@@ -32,6 +32,58 @@ def test_health() -> None:
     print("✓ health")
 
 
+def test_health_deep() -> None:
+    d = run(["--health-deep"])
+    assert d.get("status") in ("OK", "DEGRADED", "CRITICAL"), f"health-deep 异常: {d}"
+    assert "checks" in d and "repair_hint" in d and "retest" in d, f"health-deep 缺字段: {d}"
+    assert "sandbox_writable" in d["checks"] and "genes_integrity" in d["checks"] and "memory_db" in d["checks"]
+    # ε 闭环：监测→修复→复检 hint 必含修复指引
+    assert d["retest"].startswith("python3"), f"retest 应为复检命令: {d}"
+    print("✓ health_deep（Ψ 深度健康监测，含 repair_hint/retest ε 闭环）")
+
+
+def test_feedback_record() -> None:
+    d = run(["--feedback", "测试任务", "success", "gene_xyz"])
+    assert d.get("status") == "OK", f"feedback 失败: {d}"
+    assert d["recorded"]["gene_id"] == "gene_xyz" and d["recorded"]["outcome"] == "success"
+    assert d["event_count"] >= 1
+    print("✓ feedback 记录（Φ 正反馈采集）")
+
+
+def test_feedback_invalid_outcome() -> None:
+    d = run(["--feedback", "t", "maybe", "g"])
+    assert d.get("status") == "BLOCKED", f"非法 outcome 应 BLOCKED: {d}"
+    print("✓ feedback 非法 outcome 返回 BLOCKED")
+
+
+def test_feedback_stats() -> None:
+    d = run(["--feedback-stats"])
+    assert d.get("status") in ("OK", "DEGRADED"), f"feedback-stats 异常: {d}"
+    assert "total_events" in d and "success_rate" in d
+    print("✓ feedback_stats（Φ 复用成功率统计）")
+
+
+def test_prune_genes() -> None:
+    d = run(["--prune-genes"])
+    assert d.get("status") == "OK", f"prune 失败: {d}"
+    assert "newly_deprecated" in d and "total_deprecated" in d
+    print("✓ prune_genes（Φ 无效基因淘汰，可回滚）")
+
+
+def test_status_summary() -> None:
+    d = run(["--status"])
+    assert d.get("status") in ("OK", "DEGRADED", "CRITICAL"), f"status 异常: {d}"
+    assert "health" in d and "genes" in d and "feedback" in d
+    print("✓ status（Λ 统一状态入口）")
+
+
+def test_match_filters_deprecated() -> None:
+    # 用 --include-deprecated 验证参数存在；match 本身 OK 或 BLOCKED 不崩
+    d = run(["--match", "xyzzy-nonsense", "--include-deprecated"])
+    assert d.get("status") in ("OK", "BLOCKED"), f"match 应 OK/BLOCKED: {d}"
+    print("✓ match --include-deprecated 参数可用")
+
+
 def test_list_orders() -> None:
     r = subprocess.run([sys.executable, str(SCRIPT), "--list-orders"],
                        capture_output=True, text=True, timeout=30)
@@ -163,6 +215,7 @@ def test_gene_from_memory() -> None:
 
 def main() -> None:
     test_health()
+    test_health_deep()
     test_list_orders()
     test_init_workspace()
     test_substitute_orders()
@@ -178,8 +231,14 @@ def main() -> None:
     test_gene_llm_missing_provider()
     test_gene_llm_missing_workspace()
     test_match_empty_bank()
+    test_match_filters_deprecated()
     test_gene_sync_missing_workspace()
     test_gene_from_memory()
+    test_feedback_record()
+    test_feedback_invalid_outcome()
+    test_feedback_stats()
+    test_prune_genes()
+    test_status_summary()
     print("\n全部测试通过 ✅")
 
 

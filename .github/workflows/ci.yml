@@ -37,3 +37,19 @@ jobs:
       - name: Verify example curve script
         run: |
           python3 examples/plot_evolution_curve.py
+
+      - name: Verify deep health (Ψ)
+        run: |
+          python3 scripts/self_evolve.py --health-deep --no-memory | grep '"status": "OK"'
+
+      - name: Verify unified status (Λ)
+        run: |
+          python3 scripts/self_evolve.py --status | grep '"status": "OK"'
+
+      - name: Verify feedback stats (Φ)
+        run: |
+          python3 scripts/self_evolve.py --feedback-stats | grep '"status": "OK"'
+
+      - name: Verify prune (Φ, sandbox-isolated)
+        run: |
+          python3 scripts/self_evolve.py --prune-genes | grep '"status": "OK"'

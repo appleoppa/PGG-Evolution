@@ -79,7 +79,8 @@ def _load_llm_provider(provider: str) -> dict:
     """从 models.json 读 provider 配置 + 白名单凭据桥取真密钥。
 
     密钥只进进程内存，不打印、不落盘、不写仓库。
-    provider → 白名单 key 映射见下方 key_name 字典（部署方按自身凭据桥白名单配置）。
+    provider 映射到白名单 key：sol→GPT_5_6_SOL_API_KEY, terra→GPT_5_6_TERRA_API_KEY,
+    deepseek-v4-flash→DEEPSEEK_V4_FLASH_API_KEY, maoge-dp4→MAOGE_DP4_API_KEY, senseaudio→SENSEAUDIO_API_KEY。
     """
     if not MODELS_JSON.exists():
         return {"error": f"models.json 不存在: {MODELS_JSON}"}
@@ -94,10 +95,9 @@ def _load_llm_provider(provider: str) -> dict:
     if not cfg.get("baseUrl"):
         return {"error": f"provider '{provider}' 缺 baseUrl"}
 
-    # 通过宿主白名单凭据桥取真密钥（密钥只在内存，不打印；桥路径由宿主环境提供）
+    # 通过白名单凭据桥取真密钥（密钥只在内存，不打印）
     bridge = Path.home() / ".pi" / "agent" / "bin" / "hermes-env-key"
     key_name = {
-        # 密钥名映射为通用占位：实际密钥名由部署方在凭据桥白名单中配置
         "sol": "GPT_5_6_SOL_API_KEY",
         "terra": "GPT_5_6_TERRA_API_KEY",
         "deepseek-v4-flash": "DEEPSEEK_V4_FLASH_API_KEY",
@@ -195,6 +195,266 @@ def health_check() -> dict:
         "three_orders": list(THREE_ORDERS.keys()),
         "dimensions": len(DIMENSIONS),
         "contract": "pgg-module-plugin/v1",
+    }
+
+
+def _load_feedback() -> dict:
+    """加载复用反馈库（Φ 正反馈）。沙箱根 feedback.json，结构含 events 列表。"""
+    fb_file = SANDBOX / "feedback.json"
+    if not fb_file.exists():
+        return {"schema": "pgg-evolution/feedback/v1", "updated_at": "", "events": []}
+    try:
+        return json.loads(fb_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {"schema": "pgg-evolution/feedback/v1", "updated_at": "", "events": [], "corrupt": str(fb_file)}
+
+
+def _save_feedback(fb: dict) -> None:
+    fb["schema"] = "pgg-evolution/feedback/v1"
+    fb["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    (SANDBOX / "feedback.json").write_text(json.dumps(fb, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_deprecated_ids() -> set:
+    """加载已淘汰基因 id 集合（Φ 淘汰运行时过滤，不改原始基因文件，可回滚）。"""
+    dep_file = SANDBOX / "genes" / "deprecated.json"
+    if not dep_file.exists():
+        return set()
+    try:
+        d = json.loads(dep_file.read_text(encoding="utf-8"))
+        return {x.get("gene_id") for x in d.get("deprecated", []) if x.get("gene_id")}
+    except Exception:
+        return set()
+
+
+def health_deep(check_memory: bool = True) -> dict:
+    """Ψ 深度健康监测：基因库完整性、基因 schema 合法性、记忆库连通性、沙箱可写性、反馈状态。
+
+    输出 actionable repair_hint + retest 命令，与 ε 自修复形成 监测→修复→复检 闭环。
+    """
+    checks = {}
+    issues = []
+
+    # 1. 沙箱可写性
+    sandbox_ok = os.access(SANDBOX, os.W_OK)
+    checks["sandbox_writable"] = {"ok": sandbox_ok, "path": str(SANDBOX)}
+    if not sandbox_ok:
+        issues.append("沙箱不可写（~/.pi/agent/evolution）")
+
+    # 2. 基因库目录与文件
+    genes_dir = SANDBOX / "genes"
+    gene_files = sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []
+    checks["genes_dir"] = {"ok": len(gene_files) > 0, "files": len(gene_files), "path": str(genes_dir)}
+    if not gene_files:
+        issues.append("基因库为空（先跑 --gene 或 --gene-llm 沉淀）")
+
+    # 3. 基因 schema 完整性
+    broken = []
+    total_genes = 0
+    for f in gene_files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            broken.append(f"{f.name}: JSON 解析失败")
+            continue
+        if d.get("schema") != "pgg-evolution/gene-bank/v1":
+            broken.append(f"{f.name}: schema 非 pgg-evolution/gene-bank/v1")
+        genes = d.get("genes")
+        if not isinstance(genes, list):
+            broken.append(f"{f.name}: genes 非列表")
+            continue
+        if d.get("gene_count") != len(genes):
+            broken.append(f"{f.name}: gene_count({d.get('gene_count')}) 与实际({len(genes)}) 不符")
+        for i, g in enumerate(genes):
+            if not isinstance(g, dict) or not g:
+                broken.append(f"{f.name}: 第{i}个基因为空")
+        total_genes += len(genes)
+    genes_ok = not broken and len(gene_files) > 0
+    checks["genes_integrity"] = {"ok": genes_ok, "files": len(gene_files), "total_genes": total_genes, "broken": broken}
+    for b in broken[:5]:
+        issues.append(f"基因库损坏: {b}")
+
+    # 4. 记忆库连通性（check_memory=False 时跳过，供 CI/无记忆库环境）
+    db_path = Path.home() / "PGG-WIKI" / "brain.sqlite3"
+    mem_ok = not check_memory
+    approved = 0
+    mem_detail = "skipped (check_memory=False)" if not check_memory else f"db_missing:{not db_path.exists()}"
+    if check_memory and db_path.exists():
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = con.cursor()
+            cur.execute("SELECT COUNT(*) FROM assets WHERE status='APPROVED'")
+            approved = cur.fetchone()[0]
+            con.close()
+            mem_ok = True
+            mem_detail = f"approved_granules={approved}"
+        except Exception as e:
+            mem_detail = f"query_failed:{e}"
+    checks["memory_db"] = {"ok": mem_ok, "path": str(db_path), "approved_granules": approved, "detail": mem_detail}
+    if not mem_ok:
+        issues.append(f"记忆库连通性异常: {mem_detail}")
+
+    # 5. kill switch
+    ks_active = os.environ.get(KILL_SWITCH) == "1"
+    checks["kill_switch"] = {"ok": not ks_active, "active": ks_active, "env": KILL_SWITCH}
+    if ks_active:
+        issues.append(f"kill switch 已激活（{KILL_SWITCH}=1）")
+
+    # 6. 反馈状态
+    fb = _load_feedback()
+    events = fb.get("events", [])
+    checks["feedback"] = {"ok": not fb.get("corrupt"), "events": len(events), "corrupt": fb.get("corrupt", "")}
+    if fb.get("corrupt"):
+        issues.append(f"反馈库损坏: {fb['corrupt']}")
+
+    if not issues:
+        status = "OK"
+        repair_hint = "无异常，无需修复"
+    elif len(issues) <= 2:
+        status = "DEGRADED"
+        repair_hint = "；".join(issues) + "。可执行修复：修复对应文件/目录后重跑 --health-deep 复检"
+    else:
+        status = "CRITICAL"
+        repair_hint = "；".join(issues) + "。需人工介入，修复后重跑 --health-deep 复检"
+
+    return {
+        "status": status,
+        "plugin": "self-evolution",
+        "checks": checks,
+        "issues": issues,
+        "repair_hint": repair_hint,
+        "retest": "python3 scripts/self_evolve.py --health-deep",
+        "note": "Ψ 健康监测：任何 ok=false 需修复后复检；监测→修复→复检闭环（ε）",
+    }
+
+
+def feedback_record(task_desc: str, outcome: str, gene_id: str | None = None, note: str = "") -> dict:
+    """Φ 记录基因复用反馈：success（复用有效）或 failure（复用无效/误导）。"""
+    if outcome not in ("success", "failure"):
+        return {"status": "BLOCKED", "reason": f"无效 outcome: {outcome}，可选 success/failure"}
+    fb = _load_feedback()
+    events = fb.get("events", [])
+    events.append({
+        "id": f"fb-{time.strftime('%Y%m%d%H%M%S')}-{len(events) + 1}",
+        "task_desc": task_desc,
+        "gene_id": gene_id or "",
+        "outcome": outcome,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "note": note,
+    })
+    fb["events"] = events
+    _save_feedback(fb)
+    return {"status": "OK", "recorded": events[-1], "event_count": len(events), "file": str(SANDBOX / "feedback.json")}
+
+
+def feedback_stats() -> dict:
+    """Φ 反馈统计：按基因/总体统计复用成功率，供淘汰决策。"""
+    fb = _load_feedback()
+    events = fb.get("events", [])
+    if fb.get("corrupt"):
+        return {"status": "DEGRADED", "reason": f"反馈库损坏: {fb['corrupt']}", "events": events}
+    total = len(events)
+    success = sum(1 for e in events if e.get("outcome") == "success")
+    failure = sum(1 for e in events if e.get("outcome") == "failure")
+    by_gene: dict = {}
+    for e in events:
+        gid = e.get("gene_id") or "(未关联)"
+        d = by_gene.setdefault(gid, {"success": 0, "failure": 0})
+        d[e.get("outcome")] = d.get(e.get("outcome"), 0) + 1
+    per_gene = [
+        {"gene_id": gid, "success": v["success"], "failure": v["failure"],
+         "failure_rate": round(v["failure"] / (v["success"] + v["failure"]), 3) if (v["success"] + v["failure"]) else 0.0}
+        for gid, v in sorted(by_gene.items(), key=lambda x: -(x[1]["failure"] / max(1, x[1]["success"] + x[1]["failure"])))
+    ]
+    return {
+        "status": "OK",
+        "total_events": total,
+        "success": success,
+        "failure": failure,
+        "success_rate": round(success / total, 3) if total else 0.0,
+        "per_gene": per_gene,
+        "file": str(SANDBOX / "feedback.json"),
+        "note": "failure_rate 超阈值可 --prune-genes 淘汰",
+    }
+
+
+def prune_genes(threshold: float = 0.5, min_samples: int = 2) -> dict:
+    """Φ 淘汰无效基因：复用失败率 ≥ threshold 且样本 ≥ min_samples 的基因标记 deprecated。
+
+    淘汰只写 deprecated.json（运行时过滤），不改原始基因文件，可回滚。
+    """
+    fb = _load_feedback()
+    events = fb.get("events", [])
+    if fb.get("corrupt"):
+        return {"status": "DEGRADED", "reason": f"反馈库损坏: {fb['corrupt']}", "deprecated": []}
+    by_gene: dict = {}
+    for e in events:
+        gid = e.get("gene_id")
+        if not gid:
+            continue
+        d = by_gene.setdefault(gid, {"success": 0, "failure": 0})
+        d[e.get("outcome")] = d.get(e.get("outcome"), 0) + 1
+    candidates = []
+    for gid, v in by_gene.items():
+        total = v["success"] + v["failure"]
+        if total < min_samples:
+            continue
+        failure_rate = v["failure"] / total
+        if failure_rate >= threshold:
+            candidates.append({"gene_id": gid, "failure_rate": round(failure_rate, 3), "samples": total})
+
+    dep_file = SANDBOX / "genes" / "deprecated.json"
+    existing = _load_deprecated_ids()
+    new_deprecated = [c for c in candidates if c["gene_id"] not in existing]
+    dep_payload = {
+        "schema": "pgg-evolution/deprecated/v1",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "deprecated": [
+            {"gene_id": c["gene_id"], "failure_rate": c["failure_rate"], "samples": c["samples"],
+             "reason": f"复用失败率 {c['failure_rate']} ≥ 阈值 {threshold}（{c['samples']} 样本）", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+            for c in candidates
+        ]
+        + [{"gene_id": gid, "reason": "历史标记", "at": ""} for gid in existing],
+    }
+    dep_file.parent.mkdir(parents=True, exist_ok=True)
+    dep_file.write_text(json.dumps(dep_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "status": "OK",
+        "threshold": threshold,
+        "min_samples": min_samples,
+        "newly_deprecated": [c["gene_id"] for c in new_deprecated],
+        "total_deprecated": len(dep_payload["deprecated"]),
+        "file": str(dep_file),
+        "note": "淘汰为运行时过滤（deprecated.json），原始基因文件保留，可回滚",
+    }
+
+
+def status_summary() -> dict:
+    """Λ_ctx 统一状态入口：健康 + 基因库 + 反馈统计 一处汇总。"""
+    h = health_deep()
+    fb = _load_feedback()
+    events = fb.get("events", [])
+    success = sum(1 for e in events if e.get("outcome") == "success")
+    failure = sum(1 for e in events if e.get("outcome") == "failure")
+    genes_dir = SANDBOX / "genes"
+    gene_files = sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []
+    total_genes = 0
+    for f in gene_files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            total_genes += len(d.get("genes", []))
+        except Exception:
+            pass
+    return {
+        "status": h["status"],
+        "plugin": "self-evolution",
+        "health": {k: v.get("ok") for k, v in h["checks"].items()},
+        "genes": {"files": len(gene_files), "total": total_genes, "deprecated": len(_load_deprecated_ids())},
+        "feedback": {"events": len(events), "success": success, "failure": failure,
+                      "success_rate": round(success / len(events), 3) if events else 0.0},
+        "repair_hint": h["repair_hint"],
+        "note": "统一状态入口：健康/基因/反馈一处可查（Λ_ctx 切换损耗收敛）",
     }
 
 
@@ -306,14 +566,17 @@ def collect_genes(task_name: str) -> dict:
                 g = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            if g.get("shortboard"):
-                genes.append({
-                    "type": "gap",
-                    "source": f.name,
-                    "module": g.get("module", ""),
-                    "mechanism": g["shortboard"],
-                    "resolution": g.get("resolution", ""),
-                })
+            # 兼容单对象或数组（防御性：历史数据可能是列表）
+            items = g if isinstance(g, list) else [g]
+            for gi in items:
+                if gi.get("shortboard"):
+                    genes.append({
+                        "type": "gap",
+                        "source": f.name,
+                        "module": gi.get("module", ""),
+                        "mechanism": gi["shortboard"],
+                        "resolution": gi.get("resolution", ""),
+                    })
 
     # 从 candidates/ 提取修复动作（EXECUTED）
     cand_dir = loop_dir / "candidates"
@@ -323,14 +586,16 @@ def collect_genes(task_name: str) -> dict:
                 c = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            if c.get("status") == "EXECUTED" and c.get("change"):
-                changes = c["change"] if isinstance(c["change"], list) else [c["change"]]
-                genes.append({
-                    "type": "fix",
-                    "source": f.name,
-                    "mechanism": "; ".join(str(x) for x in changes),
-                    "risk": c.get("risk", ""),
-                })
+            items = c if isinstance(c, list) else [c]
+            for ci in items:
+                if ci.get("status") == "EXECUTED" and ci.get("change"):
+                    changes = ci["change"] if isinstance(ci["change"], list) else [ci["change"]]
+                    genes.append({
+                        "type": "fix",
+                        "source": f.name,
+                        "mechanism": "; ".join(str(x) for x in changes),
+                        "risk": ci.get("risk", ""),
+                    })
 
     # 从 evidence/ 提取已核验事实（闭环的核心经验）
     ev_dir = loop_dir / "evidence"
@@ -340,14 +605,16 @@ def collect_genes(task_name: str) -> dict:
                 ev = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            for fact in ev.get("facts", []):
-                if fact.get("verified") and fact.get("claim"):
-                    genes.append({
-                        "type": "lesson",
-                        "source": f.name,
-                        "mechanism": fact["claim"],
-                        "inference": bool(fact.get("inference", False)),
-                    })
+            items = ev if isinstance(ev, list) else [ev]
+            for evi in items:
+                for fact in evi.get("facts", []):
+                    if fact.get("verified") and fact.get("claim"):
+                        genes.append({
+                            "type": "lesson",
+                            "source": f.name,
+                            "mechanism": fact["claim"],
+                            "inference": bool(fact.get("inference", False)),
+                        })
 
     # 写入基因库（沙箱 genes/，按任务聚合）
     genes_dir = SANDBOX / "genes"
@@ -419,10 +686,14 @@ def gene_llm(task_name: str, provider: str, model: str | None = None) -> dict:
 
 
 def _load_gene_bank() -> list[dict]:
-    """加载沙箱基因库全部基因（含 LLM 生成与规则提取）。"""
+    """加载沙箱基因库全部基因（含 LLM 生成与规则提取）。
+
+    已淘汰基因（deprecated.json 记录）标记 _deprecated=True，仍保留在库中供追溯。
+    """
     genes_dir = SANDBOX / "genes"
     if not genes_dir.is_dir():
         return []
+    deprecated = _load_deprecated_ids()
     all_genes = []
     for f in sorted(genes_dir.glob("genes-*.json")):
         try:
@@ -432,18 +703,24 @@ def _load_gene_bank() -> list[dict]:
         for g in d.get("genes", []):
             if isinstance(g, dict) and (g.get("mechanism") or g.get("strategy")):
                 g["_source"] = f.name
+                g["_deprecated"] = g.get("id") in deprecated
                 all_genes.append(g)
     return all_genes
 
 
-def match_genes(task_desc: str, top_n: int = 3) -> dict:
+def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False) -> dict:
     """基因匹配复用（D12 元学习闭环）：新任务描述匹配历史基因。
 
     简单关键词/维度名匹配（signals_match + mechanism + id），返回 top 可复用基因。
+    默认排除已淘汰基因（Φ 反馈淘汰的运行时过滤）。
     """
     genes = _load_gene_bank()
     if not genes:
         return {"status": "BLOCKED", "reason": "基因库为空（先跑 --gene 或 --gene-llm）"}
+    if not include_deprecated:
+        genes = [g for g in genes if not g.get("_deprecated")]
+        if not genes:
+            return {"status": "OK", "task": task_desc, "matched": 0, "genes": [], "note": "可用基因全被淘汰，可新建闭环或 --include-deprecated 查看历史"}
     scored = []
     for g in genes:
         score = 0
@@ -595,11 +872,41 @@ def main() -> int:
     ap.add_argument("--gene-sync", metavar="TASK", help="双向写回 A 向：基因→记忆颗粒（生成结算文档，走标准记忆管线）")
     ap.add_argument("--gene-from-memory", metavar="TOPIC", help="双向写回 B 向：记忆颗粒→基因（从记忆库检索经验，LLM 提炼基因）")
     ap.add_argument("--list-genes", action="store_true", help="列出基因库")
+    ap.add_argument("--health-deep", action="store_true", help="Ψ 深度健康监测：基因库/记忆库/沙箱/反馈完整性")
+    ap.add_argument("--no-memory", action="store_true", help="health-deep 跳过记忆库检查（CI/无记忆库环境用）")
+    ap.add_argument("--feedback", nargs=3, metavar=("TASK_DESC", "OUTCOME", "GENE_ID"), help="Φ 记录基因复用反馈：success/failure（GENE_ID 可省略填 -）")
+    ap.add_argument("--feedback-stats", action="store_true", help="Φ 反馈统计：按基因/总体复用成功率")
+    ap.add_argument("--prune-genes", nargs="?", const="0.5", metavar="THRESHOLD", help="Φ 淘汰无效基因：失败率≥阈值(默认0.5)且样本≥2 标记 deprecated")
+    ap.add_argument("--include-deprecated", action="store_true", help="匹配/统计时包含已淘汰基因")
+    ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
 
     if args.health:
         print(json.dumps(health_check(), ensure_ascii=False, indent=2))
+        return 0
+    if args.health_deep:
+        print(json.dumps(health_deep(check_memory=not args.no_memory), ensure_ascii=False, indent=2))
+        return 0
+    if args.status:
+        print(json.dumps(status_summary(), ensure_ascii=False, indent=2))
+        return 0
+    if args.feedback:
+        task_desc, outcome, gene_id = args.feedback
+        if gene_id == "-":
+            gene_id = ""
+        print(json.dumps(feedback_record(task_desc, outcome, gene_id or None), ensure_ascii=False, indent=2))
+        return 0
+    if args.feedback_stats:
+        print(json.dumps(feedback_stats(), ensure_ascii=False, indent=2))
+        return 0
+    if args.prune_genes is not None:
+        try:
+            thr = float(args.prune_genes)
+        except ValueError:
+            print(json.dumps({"status": "BLOCKED", "reason": f"无效阈值: {args.prune_genes}"}, ensure_ascii=False))
+            return 2
+        print(json.dumps(prune_genes(threshold=thr), ensure_ascii=False, indent=2))
         return 0
     if args.init:
         print(json.dumps(init_workspace(args.init), ensure_ascii=False, indent=2))
@@ -625,7 +932,7 @@ def main() -> int:
         print(json.dumps(gene_llm(args.gene_llm, args.llm_provider, args.llm_model), ensure_ascii=False, indent=2))
         return 0
     if args.match:
-        print(json.dumps(match_genes(args.match), ensure_ascii=False, indent=2))
+        print(json.dumps(match_genes(args.match, include_deprecated=args.include_deprecated), ensure_ascii=False, indent=2))
         return 0
     if args.gene_sync:
         print(json.dumps(gene_sync(args.gene_sync), ensure_ascii=False, indent=2))
