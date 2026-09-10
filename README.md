@@ -3,7 +3,7 @@
 > 一个可复用的「智能体自进化」工程方案：把 APEX 公式体系、开智进化循环、EVM 治理
 > 整理为可执行的证据驱动受控闭环。**不是玄学公式，是让每次排障变成可复现资产的方法论。**
 
-![version](https://img.shields.io/badge/version-0.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![CI](https://github.com/appleoppa/PGG-Evolution/actions/workflows/ci.yml/badge.svg)
+![version](https://img.shields.io/badge/version-0.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![CI](https://github.com/appleoppa/PGG-Evolution/actions/workflows/ci.yml/badge.svg)
 
 > **English**: A reusable self-evolution framework for AI agents — APEX formulas + evidence-driven
 > closed loop + holdout evaluation. Works with any agent (Pi/Codex/Claude/DeepSeek...).

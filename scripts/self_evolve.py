@@ -384,6 +384,8 @@ def prune_genes(threshold: float = 0.5, min_samples: int = 2) -> dict:
 
     淘汰只写 deprecated.json（运行时过滤），不改原始基因文件，可回滚。
     """
+    if not SANDBOX.is_dir() or not os.access(SANDBOX, os.W_OK):
+        return {"status": "OK", "reason": "沙箱不可写/不存在，跳过淘汰（CI/无沙箱环境）", "newly_deprecated": [], "total_deprecated": 0, "file": ""}
     fb = _load_feedback()
     events = fb.get("events", [])
     if fb.get("corrupt"):
