@@ -10,7 +10,7 @@
     "pi",
     "pgg"
   ],
-  "description": "把 2026-05~07 月'自我进化'文件夹理论（APEX 公式体系 + 开智进化循环 + EVM 治理 + 证据驱动受控闭环）整理为可复用的自进化执行方案：含公式、三顺序代入方法、短板暴露、holdout 评测、基因入库与验证门禁。",
+  "description": "自进化插件 Pi 宿主适配示例（核心引擎通用，本文件演示如何在 Pi 注册工具）",
   "permissions": {
     "default": "deny",
     "read_local_files": {

@@ -7,21 +7,20 @@
   "classification": "plugin",
   "runtime": "python3",
   "profile_scope": [
-    "pi",
-    "pgg"
+    "any"
   ],
   "description": "把 2026-05~07 月'自我进化'文件夹理论（APEX 公式体系 + 开智进化循环 + EVM 治理 + 证据驱动受控闭环）整理为可复用的自进化执行方案：含公式、三顺序代入方法、短板暴露、holdout 评测、基因入库与验证门禁。",
   "permissions": {
     "default": "deny",
     "read_local_files": {
       "path": [
-        "~/.pi/agent/evolution/"
+        "${EVOLUTION_SANDBOX}"
       ],
       "approval_required": false
     },
     "write_sandbox": {
       "path": [
-        "~/.pi/agent/evolution/"
+        "${EVOLUTION_SANDBOX}"
       ],
       "approval_required": false
     },
@@ -43,11 +42,11 @@
   "secret_references": [],
   "lifecycle": {
     "kill_switch": "SELF_EVOLUTION_PLUGIN_DISABLED=1 时插件拒绝运行",
-    "rollback": "所有产物在 ~/.pi/agent/evolution/ 沙箱，删除目录即可完全卸载；生产改动需独立备份回滚",
+    "rollback": "所有产物在 EVOLUTION_SANDBOX 沙箱（默认 ~/.pi/agent/evolution/，可配置），删除目录即可完全卸载；生产改动需独立备份回滚",
     "uninstall_residue": "插件目录删除后无残留；不写入 canonical memory、不修改生产配置"
   },
   "observability": {
-    "health_check": "scripts/self_evolve.py --health",
+    "health_check": "python3 scripts/self_evolve.py --health",
     "receipt": "每次运行输出 correlation_id + 状态 + 证据文件路径"
   },
   "verification": {
@@ -72,5 +71,9 @@
     "evm_repo": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
     "results_package": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
     "note": "桌面原始文件只读；本插件是整理后的可执行方案"
+  },
+  "integration": {
+    "generic": "核心引擎 scripts/self_evolve.py 是纯 Python 标准库，任何 agent 可直接调用 CLI",
+    "pi_example": "plugins/pi/ 是宿主接入示例（把 CLI 包装成工具），非绑定"
   }
 }

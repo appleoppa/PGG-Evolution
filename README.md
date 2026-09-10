@@ -49,15 +49,23 @@ PGG-Evolution/
 │   ├── GATES.md         # 五层门禁 + 三重进化门禁
 │   └── USAGE.md         # 详细使用说明
 ├── scripts/
-│   └── self_evolve.py   # 自进化引擎（可执行）
+│   └── self_evolve.py   # 自进化引擎（可执行，通用，不绑定宿主）
 ├── plugins/
-│   └── pi/              # Pi 宿主接入（pgg-self-evolution.ts）
+│   └── pi/              # 宿主接入示例（以 Pi 为例；核心引擎本身通用）
 ├── tests/
 │   └── test_self_evolve.py  # 兼容性测试
 ├── examples/
 │   └── pilot-legal-kb-retrieval/  # 实战案例（完整证据链）
 └── evidence/            # 实战证据（评测曲线等）
 ```
+
+## 通用接入（任何 agent 都能用）
+
+核心是 `scripts/self_evolve.py`——**纯 Python 标准库、零依赖、不绑定任何 agent**。
+
+- **任何宿主**：直接 `python3 scripts/self_evolve.py ...` 调用（CLI 全部能力）
+- **Pi**：`plugins/pi/` 是**示例适配器**（把 CLI 包装成 17 个工具），仅供演示如何接入——你完全可以为 Codex/Claude/DeepSeek 等写类似适配器
+- **无宿主**：作为独立脚本/技能使用
 
 ## 为什么值得用
 

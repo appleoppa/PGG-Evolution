@@ -74,7 +74,24 @@ python3 scripts/self_evolve.py --eval <task> --set holdout
 - 只有 **holdout 提升** 才算真泛化证据
 - holdout 一旦被调优看过，就必须换新一批
 
-## 5. Pi 宿主接入（插件）
+## 5. 通用接入（推荐，任何宿主）
+
+核心引擎 `scripts/self_evolve.py` 是**纯 Python 标准库、零依赖、不绑定任何 agent**：
+
+```bash
+# 任何宿主都能直接用（bash/工具调用）
+python3 scripts/self_evolve.py --health
+python3 scripts/self_evolve.py --status
+```
+
+- **Codex / Claude / DeepSeek / 其他 agent**：直接用工具/bash 调用 CLI
+- **远程 CI / 容器**：把脚本放进 workflow，无需宿主持有
+- **无宿主**：作为独立脚本/技能使用
+
+## 6. 宿主接入示例（以 Pi 为例）
+
+> 这不是绑定：Pi 只是**一个演示如何接入**的例子。任何宿主都可以用 §5 的通用方式，
+> 或仿照 `plugins/pi/pgg-self-evolution.ts` 写自己的适配器。
 
 把 `plugins/pi/pgg-self-evolution.ts` 复制到 `~/.pi/agent/extensions/`，然后 `/reload` 或重启 Pi。
 注册后可用工具（17 个）：
@@ -97,13 +114,6 @@ python3 scripts/self_evolve.py --eval <task> --set holdout
 - `pgg_self_evolution_status` — Λ 统一状态入口（健康+基因+反馈一处汇总）
 
 引擎直接调用：`python3 scripts/self_evolve.py --health-deep / --feedback ... / --prune-genes / --status`（--help 见全部 CLI）
-
-## 6. 与其他宿主集成
-
-本方案是**纯 Python 标准库**，任何 agent 都可以调用 `scripts/self_evolve.py`：
-- Codex / Claude / DeepSeek：直接用 bash 调用
-- 远程 GitHub Actions：把脚本放进 workflow 容器
-- 任何宿主：作为技能脚本（本方案不绑定特定 agent）
 
 ## 7. 禁用 / 卸载
 
