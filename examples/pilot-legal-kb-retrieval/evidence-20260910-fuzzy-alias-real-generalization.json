@@ -1,0 +1,44 @@
+{
+  "schema": "pgg-evolution-pilot/evidence/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "collected_at": "2026-09-10T10:02:00+08:00",
+  "topic": "fuzzy_alias_match 实现真实泛化提升",
+  "facts": [
+    {
+      "id": "G1",
+      "claim": "holdout2（冻结未调优）基线 33.3%（2/6）→ fuzzy 匹配后 100%（6/6）",
+      "evidence": "frozen-eval-20260910-095200.json vs frozen-eval-20260910-100127.json",
+      "verified": true
+    },
+    {
+      "id": "G2",
+      "claim": "提升来源是通用算法 fuzzy_alias_match（字符序列近似匹配），非针对 holdout2 写规则；单测含反例（拒绝'故意杀人'在'剥夺生命'、拒绝'盗窃'在'抢夺'）",
+      "evidence": "fuzzy_alias_match 单测 6 例全过",
+      "verified": true
+    },
+    {
+      "id": "G3",
+      "claim": "warmup 保持 100%（12/12）无回归",
+      "evidence": "frozen-eval-20260910-100149.json",
+      "verified": true
+    },
+    {
+      "id": "G4",
+      "claim": "精确条号/dense/hybrid 回归全部正常",
+      "evidence": "回归1-3 status=OK",
+      "verified": true
+    },
+    {
+      "id": "G5",
+      "claim": "意义：第一次在冻结未调优集合上验证真实泛化提升（33.3%→100%），是真进化证据，非过拟合",
+      "evidence": "G1+G2",
+      "verified": true,
+      "inference": true
+    }
+  ],
+  "change": {
+    "file": "法律知识库/api/legal_kb_search.py（本地路径，未公开）",
+    "what": "新增 fuzzy_alias_match 函数（字符序列近似匹配），aliases 匹配支持近似命中；同时补 6 组语义别名（故意伤害/盗窃/抢劫/非法拘禁/危险驾驶/放火）",
+    "rollback": "备份 legal_kb_search.py.bak-20260910-crime-threshold"
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "schema": "pgg-evolution-pilot/frozen-eval-run/v1",
+  "run_at": "2026-09-10T02:35:17+0800",
+  "eval_set": "frozen-legal-kb-baseline-001",
+  "summary": {
+    "3-1": {
+      "hit": 0,
+      "total": 6,
+      "rate": 0.0
+    },
+    "3-2": {
+      "hit": 0,
+      "total": 3,
+      "rate": 0.0
+    },
+    "3-3": {
+      "hit": 0,
+      "total": 3,
+      "rate": 0.0
+    },
+    "overall": {
+      "hit": 0,
+      "total": 12,
+      "rate": 0.0
+    }
+  },
+  "results": [
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-001",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-002",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-003",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-004",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-005",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-1-006",
+      "task": "3-1"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-2-001",
+      "task": "3-2"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-2-002",
+      "task": "3-2"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-2-003",
+      "task": "3-2"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-3-001",
+      "task": "3-3"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-3-002",
+      "task": "3-3"
+    },
+    {
+      "status": "BLOCKED_SOURCE_MANIFEST",
+      "reason": "source_manifest_catalog_mismatch",
+      "sample_id": "KB-3-3-003",
+      "task": "3-3"
+    }
+  ]
+}

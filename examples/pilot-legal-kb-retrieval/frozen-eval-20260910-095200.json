@@ -1,0 +1,66 @@
+{
+  "schema": "pgg-evolution-pilot/frozen-eval-run/v1",
+  "run_at": "2026-09-10T09:52:00+0800",
+  "eval_set": "holdout2",
+  "set": "holdout2",
+  "summary": {
+    "3-1": {
+      "hit": 2,
+      "total": 6,
+      "rate": 0.333
+    },
+    "overall": {
+      "hit": 2,
+      "total": 6,
+      "rate": 0.333
+    }
+  },
+  "results": [
+    {
+      "status": "OK",
+      "hit": false,
+      "kb_article_nums": [],
+      "sample_id": "HO2-3-1-001",
+      "task": "3-1"
+    },
+    {
+      "status": "OK",
+      "hit": false,
+      "kb_article_nums": [],
+      "sample_id": "HO2-3-1-002",
+      "task": "3-1"
+    },
+    {
+      "status": "OK",
+      "hit": true,
+      "kb_article_nums": [
+        266
+      ],
+      "sample_id": "HO2-3-1-003",
+      "task": "3-1"
+    },
+    {
+      "status": "OK",
+      "hit": true,
+      "kb_article_nums": [
+        133
+      ],
+      "sample_id": "HO2-3-1-004",
+      "task": "3-1"
+    },
+    {
+      "status": "OK",
+      "hit": false,
+      "kb_article_nums": [],
+      "sample_id": "HO2-3-1-005",
+      "task": "3-1"
+    },
+    {
+      "status": "OK",
+      "hit": false,
+      "kb_article_nums": [],
+      "sample_id": "HO2-3-1-006",
+      "task": "3-1"
+    }
+  ]
+}

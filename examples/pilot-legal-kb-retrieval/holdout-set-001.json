@@ -1,0 +1,50 @@
+{
+  "schema": "pgg-evolution-pilot/holdout-set/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "set_id": "holdout-legal-kb-generalization-001",
+  "created_at": "2026-09-10T10:00:00+08:00",
+  "purpose": "LIFT 式 holdout 分离评测集：与 warmup（frozen-eval-set-001）严格分离，用于检验检索优化是否真实泛化而非过拟合。本集合创建前从未被用于调优。",
+  "disclaimer": "holdout 样例在创建时未参与任何 aliases/同义词规则设计；预期条号已按刑法原文人工核验（见 evidence-20260910-holdout-verification）。",
+  "sample_count": 5,
+  "samples": [
+    {
+      "id": "HO-3-1-001",
+      "task": "3-1",
+      "query": "张某为报复，将李某的汽车玻璃砸碎，毁坏财物数额较大",
+      "expected_article": [275],
+      "note": "故意毁坏财物罪第275条；映射无'毁坏财物'别名，测泛化"
+    },
+    {
+      "id": "HO-3-1-002",
+      "task": "3-1",
+      "query": "人贩子以出卖为目的，拐骗并贩卖妇女",
+      "expected_article": [240],
+      "note": "拐卖妇女儿童罪第240条；'拐骗并贩卖'非字面匹配，测语义"
+    },
+    {
+      "id": "HO-3-1-003",
+      "task": "3-1",
+      "query": "为勒索财物，将被害人劫持并限制其人身自由",
+      "expected_article": [239],
+      "note": "绑架罪第239条；'勒索财物'别名会误命中敲诈勒索274，测区分度"
+    },
+    {
+      "id": "HO-3-1-004",
+      "task": "3-1",
+      "query": "趁夜潜入居民家中，盗走贵重物品后离开",
+      "expected_article": [264],
+      "note": "入户盗窃第264条；'盗走'非字面'盗窃'，测近义"
+    },
+    {
+      "id": "HO-3-1-005",
+      "task": "3-1",
+      "query": "在街头随意殴打陌生人，致其轻微伤，情节恶劣",
+      "expected_article": [293],
+      "note": "寻衅滋事罪第293条；'随意殴打'别名有，测命中"
+    }
+  ],
+  "acceptance": {
+    "baseline_3_1_hit_rate": "holdout 创建时实测 1/5=20%（仅绑架因别名'勒索财物'误命中274，非预期239）",
+    "target": "后续优化应提升 holdout 命中率且不牺牲 warmup 100%"
+  }
+}

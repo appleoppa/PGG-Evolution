@@ -1,0 +1,43 @@
+{
+  "schema": "pgg-evolution-pilot/evidence/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "run_id": "run-20260910-0930",
+  "collected_at": "2026-09-10T09:33:00+08:00",
+  "topic": "holdout 基线揭示 100% 为过拟合",
+  "facts": [
+    {
+      "id": "H1",
+      "claim": "warmup（12 条已知样例）命中率 100%",
+      "evidence": "frozen-eval-20260910-090845.json overall rate=1.0",
+      "verified": true
+    },
+    {
+      "id": "H2",
+      "claim": "holdout（5 条未见样例）命中率 0%",
+      "evidence": "frozen-eval-20260910-093318.json 3-1 hit=0/5",
+      "verified": true
+    },
+    {
+      "id": "H3",
+      "claim": "holdout 与 warmup 差距 100%→0%，证明现有 aliases/同义词规则针对已知样例过拟合，未真实泛化",
+      "evidence": "H1+H2 对比",
+      "verified": true,
+      "inference": true
+    },
+    {
+      "id": "H4",
+      "claim": "holdout 各失败原因：HO-001 毁坏财物(275)无别名；HO-002 拐卖(240)语义不匹配；HO-003 绑架(239)误命中勒索(274)；HO-004 盗走(264)近义词无映射；HO-005 随意殴打(293)未触发",
+      "evidence": "逐条 CLI 实测",
+      "verified": true
+    },
+    {
+      "id": "H5",
+      "claim": "结论：warmup 100% 是调优过拟合（对着已知失败样例写的 aliases），真实泛化能力需以 holdout 为准",
+      "evidence": "H2+H3+H4",
+      "verified": true,
+      "inference": true
+    }
+  ],
+  "significance": "这是自进化闭环最关键的一次纠偏：表面 100% 被 holdout 戳破为 0%。如果没有 holdout，会错误宣称'检索优化完成'。LIFT 方法论验证有效。",
+  "next_action": "基于 holdout 失败样例自动生成候选 aliases（第 2 步），人工确认后入库，再验证 holdout 提升"
+}

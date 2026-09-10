@@ -1,0 +1,31 @@
+{
+  "schema": "pgg-evolution-pilot/frozen-eval-set/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "set_id": "frozen-legal-kb-baseline-001",
+  "created_at": "2026-09-10T02:35:00+08:00",
+  "purpose": "本地法条检索的冻结基线评测集（自进化闭环 Batch0 必需资产）。修复 catalog 哈希漂移后用于验证：检索恢复 + 质量不退化。",
+  "source": "LawBench zero_shot 3-1/3-2/3-3 子集 + 2026-07-05 基准报告失败样例",
+  "sample_count": 12,
+  "samples": [
+    {"id": "KB-3-1-001", "task": "3-1", "query": "被告人王某多次入户盗窃他人财物，数额较大，其行为已构成盗窃罪。", "expected_article": [264], "note": "8-13 罪名映射修复目标样例（盗窃→第264条）"},
+    {"id": "KB-3-1-002", "task": "3-1", "query": "行为人以非法占有为目的，虚构事实骗取他人财物，数额巨大。", "expected_article": [266], "note": "诈骗→第266条"},
+    {"id": "KB-3-1-003", "task": "3-1", "query": "被告人李某对妇女实施强制猥亵行为，情节恶劣。", "expected_article": [237], "note": "强制猥亵→第237条"},
+    {"id": "KB-3-1-004", "task": "3-1", "query": "犯罪嫌疑人张某故意非法剥夺他人生命，致一人死亡。", "expected_article": [232], "note": "故意杀人→第232条"},
+    {"id": "KB-3-1-005", "task": "3-1", "query": "被告人赵某以非法占有为目的，以暴力、胁迫方法抢劫公私财物。", "expected_article": [263], "note": "抢劫→第263条"},
+    {"id": "KB-3-1-006", "task": "3-1", "query": "公司职员钱某利用职务便利，将本单位财物非法占为己有，数额较大。", "expected_article": [271], "note": "职务侵占→第271条（需确认映射存在）"},
+    {"id": "KB-3-2-001", "task": "3-2", "query": "某公司股东想查阅公司会计账簿被拒绝，依据《中华人民共和国公司法》第几条可以要求查阅？", "keywords": "查阅会计账簿", "expected_law": "中华人民共和国公司法", "expected_article": [57], "note": "2023 新公司法：股东查阅会计账簿权在第五十七条（旧法第三十三条已改版）"},
+    {"id": "KB-3-2-002", "task": "3-2", "query": "房屋租赁合同纠纷中承租人擅自转租，出租人依据民法典第几条可以解除合同？", "keywords": "转租", "expected_law": "中华人民共和国民法典", "expected_article": [716], "note": "民法典第七百一十六条：转租"},
+    {"id": "KB-3-2-003", "task": "3-2", "query": "劳动者被违法解除劳动合同，依据劳动合同法第几条可以要求赔偿？", "keywords": "违法解除劳动合同", "expected_law": "中华人民共和国劳动合同法", "expected_article": [87], "note": "劳动合同法第八十七条：违法解除二倍赔偿"},
+    {"id": "KB-3-3-001", "task": "3-3", "query": "甲以非法占有为目的，通过虚构事实骗取他人财物数额巨大。罪名：诈骗罪。", "expected_crime": ["诈骗罪"], "note": "罪名知识库覆盖验证"},
+    {"id": "KB-3-3-002", "task": "3-3", "query": "乙在公共场所扒窃他人财物。罪名：盗窃罪。", "expected_crime": ["盗窃罪"], "note": "扒窃→盗窃罪"},
+    {"id": "KB-3-3-003", "task": "3-3", "query": "丙将他人打成轻伤。罪名：故意伤害罪。", "expected_crime": ["故意伤害罪"], "note": "故意伤害"}
+  ],
+  "acceptance_criteria": {
+    "3-1_article_hit_rate": ">= 80% (6/6) — 目标：罪名映射修复后恢复；7-5 基线仅 10%",
+    "3-2_law_article_hit_rate": ">= 66% (2/3)",
+    "3-3_crime_doc_coverage": "100% (3/3) — 罪名知识库强项",
+    "retrieval_available": "pgg_legal_kb_query 返回 OK 非 WATCH/BLOCKED"
+  },
+  "frozen_at": "修复前基线（当前 fail-closed，全部 BLOCKED）",
+  "baseline_snapshot": "run-20260910-0230: 3 个入口实测均 BLOCKED_SOURCE_MANIFEST，无法评测 → 修复后首个目标 = 评测可运行"
+}

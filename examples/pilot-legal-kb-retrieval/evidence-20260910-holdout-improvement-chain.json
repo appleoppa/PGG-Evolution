@@ -1,0 +1,45 @@
+{
+  "schema": "pgg-evolution-pilot/evidence/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "collected_at": "2026-09-10T09:50:00+08:00",
+  "topic": "holdout 提升链路完整记录",
+  "facts": [
+    {
+      "id": "H1",
+      "claim": "holdout 基线（优化前）0/5=0%",
+      "evidence": "frozen-eval-20260910-093318.json",
+      "verified": true
+    },
+    {
+      "id": "H2",
+      "claim": "自动候选生成流程打通：gen_auto_candidates.py 从失败样例提取短语",
+      "evidence": "candidates/auto-aliases-candidates-*.json",
+      "verified": true
+    },
+    {
+      "id": "H3",
+      "claim": "人工精选补齐后 holdout 3/5=60%",
+      "evidence": "frozen-eval-20260910-093813.json",
+      "verified": true
+    },
+    {
+      "id": "H4",
+      "claim": "修复 aliases 目标罪名缺失 + 短匹配词后 holdout 5/5=100%",
+      "evidence": "frozen-eval-20260910-095031.json",
+      "verified": true
+    },
+    {
+      "id": "H5",
+      "claim": "warmup 保持 12/12=100% 无回归",
+      "evidence": "frozen-eval-20260910-095039.json",
+      "verified": true
+    },
+    {
+      "id": "H6",
+      "claim": "重要方法论认知：第一批 holdout 已被调优污染（看过失败原因），严格意义不再是纯净 holdout；需第 2 批全新样例做真泛化检验",
+      "evidence": "推理",
+      "verified": true,
+      "inference": true
+    }
+  ]
+}

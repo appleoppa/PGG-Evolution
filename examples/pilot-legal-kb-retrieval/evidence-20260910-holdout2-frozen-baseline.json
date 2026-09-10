@@ -1,0 +1,27 @@
+{
+  "schema": "pgg-evolution-pilot/evidence/v1",
+  "pilot_id": "pilot-legal-kb-retrieval",
+  "collected_at": "2026-09-10T09:52:00+08:00",
+  "topic": "第2批纯净 holdout 冻结基线",
+  "facts": [
+    {
+      "id": "V1",
+      "claim": "第2批纯净 holdout（6条全新场景，创建后未调优）基线命中率 2/6=33.3%",
+      "evidence": "frozen-eval-20260910-095200.json",
+      "verified": true
+    },
+    {
+      "id": "V2",
+      "claim": "失败4条：HO2-001故意伤害(234)、HO2-002盗窃'拿走'(264)、HO2-004醉驾(133)、HO2-006非法拘禁(238)——创建后冻结，本次不得调优",
+      "evidence": "holdout-set-002.json 冻结",
+      "verified": true
+    },
+    {
+      "id": "V3",
+      "claim": "这是系统真实的未调优泛化能力基线；此前 holdout1 因调优污染不计入真泛化",
+      "evidence": "evidence-20260910-holdout-improvement-chain.json H6",
+      "verified": true,
+      "inference": true
+    }
+  ]
+}

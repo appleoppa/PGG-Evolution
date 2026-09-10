@@ -1,0 +1,76 @@
+{
+  "schema": "pgg-module-plugin/v1",
+  "version": "0.1.0",
+  "module": "self-evolution",
+  "name": "自进化闭环方案插件",
+  "owner": "appleoppa",
+  "classification": "plugin",
+  "runtime": "python3",
+  "profile_scope": [
+    "pi",
+    "pgg"
+  ],
+  "description": "把 2026-05~07 月'自我进化'文件夹理论（APEX 公式体系 + 开智进化循环 + EVM 治理 + 证据驱动受控闭环）整理为可复用的自进化执行方案：含公式、三顺序代入方法、短板暴露、holdout 评测、基因入库与验证门禁。",
+  "permissions": {
+    "default": "deny",
+    "read_local_files": {
+      "path": [
+        "~/.pi/agent/evolution/"
+      ],
+      "approval_required": false
+    },
+    "write_sandbox": {
+      "path": [
+        "~/.pi/agent/evolution/"
+      ],
+      "approval_required": false
+    },
+    "write_production": {
+      "approval_required": true,
+      "note": "任何生产系统改动必须人工审批"
+    },
+    "external_call": {
+      "approval_required": true,
+      "note": "LLM/外部 API 调用必须审批"
+    }
+  },
+  "data_owner": {
+    "inputs": "appleoppa",
+    "derived": "appleoppa",
+    "cache": "appleoppa",
+    "logs": "appleoppa"
+  },
+  "secret_references": [],
+  "lifecycle": {
+    "kill_switch": "SELF_EVOLUTION_PLUGIN_DISABLED=1 时插件拒绝运行",
+    "rollback": "所有产物在 ~/.pi/agent/evolution/ 沙箱，删除目录即可完全卸载；生产改动需独立备份回滚",
+    "uninstall_residue": "插件目录删除后无残留；不写入 canonical memory、不修改生产配置"
+  },
+  "observability": {
+    "health_check": "scripts/self_evolve.py --health",
+    "receipt": "每次运行输出 correlation_id + 状态 + 证据文件路径"
+  },
+  "verification": {
+    "compatibility_test": "tests/test_self_evolve.py 需全过",
+    "closed_loop_level": "green（只读/沙箱写入）；生产写入需升 yellow 并审批"
+  },
+  "risk_boundary": {
+    "never_auto": [
+      "legal_final",
+      "canonical_memory_write",
+      "mutation_authority",
+      "production_route",
+      "security_policy",
+      "scheduler",
+      "credential_config"
+    ],
+    "note": "遵循 MODULE_PLUGIN_CONTRACT_V0_1 §4：进化只允许提出候选变更，经测试、审批、可回滚发布；不自修改权限/路由/memory/安全策略"
+  },
+  "source_materials": {
+    "apex_formulas": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
+    "evolution_spec": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
+    "evm_repo": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
+    "results_package": "（原始材料路径在作者本机，未公开。理论来源：APEX 公式体系 / 开智进化循环 / EVM 治理，均为 2026-05~07 研究资料）",
+    "note": "桌面原始文件只读；本插件是整理后的可执行方案"
+  }
+}

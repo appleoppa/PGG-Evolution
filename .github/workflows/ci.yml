@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run compatibility tests
+        run: |
+          python3 tests/test_self_evolve.py
+
+      - name: Verify engine health
+        run: |
+          python3 scripts/self_evolve.py --health | grep '"status": "OK"'
+
+      - name: Verify three orders
+        run: |
+          python3 scripts/self_evolve.py --list-orders | grep -E "21354|12534|14325"
+
+      - name: Verify kill switch
+        run: |
+          SELF_EVOLUTION_PLUGIN_DISABLED=1 python3 scripts/self_evolve.py --health | grep '"status": "DISABLED"'
+
+      - name: Verify example curve script
+        run: |
+          python3 examples/plot_evolution_curve.py
