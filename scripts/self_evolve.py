@@ -2088,6 +2088,98 @@ def gene_from_memory(topic: str, provider: str = "deepseek-v4-flash", model: str
     return {"status": "OK", "task": topic, "matched_memory": len(rows), "gene_count": len(llm_genes), "gene_file": str(gene_file), "genes": llm_genes, "llm": True}
 
 
+# ── D03 风险分级 R0-R4（吸收自成果包 03-智能体学习与进化实施手册 §2.2）─────
+# 该手册的风险分级表是本项目缺失的一层：门禁只管「改了多少、改哪了」，
+# 不管「这类改动本身该不该自动」。R0-R4 补上「按变更性质定权限」。
+#
+# 原文优先级（必须原样保留，不得被评分/公式抬高权限）：
+#   平台与法律硬约束 > 用户明确指令 > 数据治理/安全策略 > 任务策略/评分公式
+#
+# 诚实边界：本表是**本地工程映射**（原本为部署模板，不声称已部署）。
+RISK_TIERS: dict[str, dict] = {
+    "R0": {
+        "label": "只读研究",
+        "examples": "检索、目录盘点、离线分析",
+        "auto_allowed": True,
+        "needs_human": False,
+        "requires": ["source_and_data_class_check"],
+    },
+    "R1": {
+        "label": "低影响实验",
+        "examples": "提示、评测规则、非敏感技能卡草案",
+        "auto_allowed": True,
+        "needs_human": False,
+        "requires": ["schema", "unit_test", "peer_review"],
+    },
+    "R2": {
+        "label": "受控变更",
+        "examples": "非生产代码/配置、路由策略、已批准知识资产",
+        "auto_allowed": False,
+        "needs_human": True,
+        "requires": ["reproduce", "test_matrix", "dependency_security_audit", "independent_review"],
+    },
+    "R3": {
+        "label": "高影响变更",
+        "examples": "生产策略、持久化、外部 API、成本显著增加、敏感数据处理",
+        "auto_allowed": False,
+        "needs_human": True,
+        "requires": ["security_privacy_review", "change_owner_and_business_auth",
+                      "gray_release_plan", "incident_plan"],
+    },
+    "R4": {
+        "label": "严格受限",
+        "examples": "凭据、权限、模型/权重、法律对外输出、生产删除/迁移、第三方发布",
+        "auto_allowed": False,   # 原文：禁止自动执行
+        "needs_human": True,
+        "requires": ["compliance_security_domain_written_auth", "two_person_review",
+                      "full_recovery_drill"],
+    },
+}
+
+# 风险特征 → 最低层级。判定取**命中项中的最高层级**（就高不就低）。
+RISK_TIER_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("R4", re.compile(r"凭据|credential|token|secret|api.?key|密钥|密码|oauth"
+                      r"|模型权重|权重文件|删除生产|数据迁移|第三方发布|对外法律|出庭|法律意见", re.I)),
+    ("R3", re.compile(r"生产|production|持久化|外发|外部 ?api|成本|账单|计费|敏感数据|隐私"
+                      r"|正式案件|案卷|当事人", re.I)),
+    ("R2", re.compile(r"非生产代码|路由策略|已批准知识资产|宿主配置|launchd"
+                      r"|自进化内核|核心逻辑|门禁实现", re.I)),
+    ("R1", re.compile(r"提示|prompt|评测规则|测试夹具|技能卡|文档", re.I)),
+    ("R0", re.compile(r"只读|检索|盘点|离线分析|扫描|审计报告|健康检查", re.I)),
+]
+
+
+def classify_risk_tier(change_desc: str) -> dict:
+    """按变更描述判定风险层级（R0-R4）。
+
+    取命中项中的**最高**层级（R4 > R3 > R2 > R1 > R0），就高不就低。
+    无任何命中 → 保守落到 R2（不降级到 R0，不给未知变更自动放行）。
+
+    关键不变式：
+      - R2/R3/R4 一律 auto_allowed=False（不得自动执行，与 diff 大小无关）
+      - R4 额外要求双人复核
+      - 该判定**不得**被 ΔG/fitness/任何分数抬高权限
+    """
+    text = change_desc or ""
+    hits: list[str] = []
+    for tier, pat in RISK_TIER_PATTERNS:
+        if pat.search(text):
+            hits.append(tier)
+    order = ["R0", "R1", "R2", "R3", "R4"]
+    tier = max(hits, key=lambda t: order.index(t)) if hits else "R2"
+    spec = RISK_TIERS[tier]
+    return {
+        "tier": tier,
+        "label": spec["label"],
+        "matched_tiers": sorted(set(hits), key=lambda t: order.index(t)),
+        "auto_allowed": spec["auto_allowed"],
+        "human_required": spec["needs_human"],
+        "required": spec["requires"],
+        "is_conservative_default": not hits,
+        "boundary": "风险层级由变更性质决定，不由评分/公式抬高权限",
+    }
+
+
 def main() -> int:
     if os.environ.get(KILL_SWITCH) == "1":
         print(json.dumps({"status": "DISABLED", "reason": f"{KILL_SWITCH}=1"}, ensure_ascii=False))
@@ -2137,6 +2229,8 @@ def main() -> int:
     ap.add_argument("--claim-file", metavar="PATH", help="D07 扫描：从文件读文本（用于汇报/文档）")
     ap.add_argument("--unwired-scan", metavar="TEXT", help="D05 §6.1 扫描：检查是否把「未接线」说成「已运行」")
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
+    ap.add_argument("--risk-classify", metavar="CHANGE_DESC",
+                    help="D03 风险分级 R0-R4：按变更描述定权限层级（只读判定）")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
 
@@ -2189,6 +2283,11 @@ def main() -> int:
         res = scan_unwired_claims(args.unwired_scan)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0 if res["status"] == "OK" else 1
+
+    if args.risk_classify is not None:
+        # D03 风险分级：只读判定，不写盘、不改权限
+        print(json.dumps(classify_risk_tier(args.risk_classify), ensure_ascii=False, indent=2))
+        return 0
 
     if args.status:
         print(json.dumps(status_summary(), ensure_ascii=False, indent=2))
