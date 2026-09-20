@@ -29,10 +29,17 @@ KIMI_BIN = BIN  # 别名（diagnose_service 用）
 
 
 def mcp(name: str, args: dict, timeout: int = 30) -> dict:
+    """调 kimi-cu MCP。任何异常（二进制不存在/超时/输出非 JSON）都 fail-closed
+    返回错误字典，不得向上抛——否则在无 kimi-cu 的环境（如 CI）会崩栈，
+    而不是给出「服务不可用」的归因（2026-09-20 CI 实测暴露）。
+    """
     req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
            "params": {"name": name, "arguments": args}}
-    p = subprocess.run([BIN, "mcp", "-s", "user"], input=json.dumps(req) + "\n",
-                       capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run([BIN, "mcp", "-s", "user"], input=json.dumps(req) + "\n",
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"_error": f"kimi-cu 不可执行: {type(exc).__name__}"}
     for ln in p.stdout.strip().splitlines():
         try:
             d = json.loads(ln)
@@ -262,7 +269,7 @@ def _pick_probe_app() -> str | None:
 
 
 def _kimi_call(app: str, mode: str) -> bool:
-    """调 kimi-cu get_app_state，返回是否有实质内容。"""
+    """调 kimi-cu get_app_state，返回是否有实质内容。任何异常 fail-closed 返回 False。"""
     try:
         r = subprocess.run([KIMI_BIN, "mcp", "-s", "user"],
                            input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",

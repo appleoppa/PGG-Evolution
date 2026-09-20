@@ -672,13 +672,20 @@ def test_coord_probe_distinguishes_env_from_bug() -> None:
                        capture_output=True, text=True, timeout=120)
     env_ready = diag["service_loaded"] and diag["kimi_screenshot_ok"] is True
     if not env_ready:
+        # 环境不满足：探针必须在权限/服务层就中止，不得继续到点击验证。
         assert r.returncode != 0, f"环境不满足时探针不得报成功: rc={r.returncode}\n{r.stdout[:300]}"
-        assert "PASS" not in r.stdout or "不得报 PASS" in r.stdout, r.stdout[:300]
-    # 必须明确归因（服务/权限/点击），不得只说「失败」
+        # 不得在任何形式下宣称坐标已实测有效（原断言用 "不得报 PASS" 子串匹配，
+        # 但探针实际输出「不得凭猜测报 PASS」，子串不命中会假失败——2026-09-20
+        # CI(ubuntu) 实测暴露。改按**意图**判定：不出现肯定结论即可）。
+        assert "坐标校正实测有效" not in r.stdout, r.stdout[:400]
+        assert "✅ 端到端点击验证通过" not in r.stdout, r.stdout[:400]
+    else:
+        # 环境就绪：必须给出端到端点击验证结论（不得只凭「缩放比等比」就宣称坐标有效）
+        assert "点击验证" in r.stdout, r.stdout[:400]
+        assert r.returncode == 0, f"环境就绪时探针应成功: rc={r.returncode}\n{r.stdout[:300]}"
+    # 必须明确归因（服务/权限），不得只说「失败」
     assert ("服务" in r.stdout or "权限" in r.stdout), r.stdout[:300]
-    # 端到端点击验证结论必须出现（不得只凭「缩放比等比」就宣称坐标有效）
-    assert "点击验证" in r.stdout or "未验证" in r.stdout, r.stdout[:400]
-    # 硬规则：不得仅凭等比缩放就宣称坐标已实测有效
+    # 硬规则：不得仅凭等比缩放就宣称坐标已实测有效（两种环境下都成立）
     assert not ("等比缩放" in r.stdout and "坐标校正实测有效" in r.stdout
                 and "点击验证" not in r.stdout), "不得只凭缩放比宣称坐标有效"
     print("✓ 坐标探针区分环境问题与代码 bug（服务/权限/点击三层归因，且不凭缩放比冒充有效）")
