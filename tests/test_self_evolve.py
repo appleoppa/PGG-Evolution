@@ -1044,6 +1044,7 @@ def test_signal_taxonomy_match_is_auditable() -> None:
       ④ 本地扩展信号必须有前缀，不得冒充 APEX 标准信号
     """
     import importlib.util
+    import tempfile, shutil
     spec = importlib.util.spec_from_file_location("se_sig", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -1074,11 +1075,45 @@ def test_signal_taxonomy_match_is_auditable() -> None:
     assert mod.normalize_signals(None) == (set(), []), "None 应安全返回空"
 
     # ⑥ 匹配结果必须回传 overlap（可审计）
-    r = mod.match_genes("本地检索系统故障 修复", top_n=3)
-    assert r["status"] == "OK", r
-    if r.get("genes"):
+    #    铁律（本轮 CI 实测教训）：测试**不得依赖本机真实基因库**。
+    #    CI 无基因库 → _load_gene_bank 返回空 → match_genes 报 BLOCKED。
+    #    旧断言硬编码 status=="OK"，在 CI 直接失败（run 35497886801）。
+    #    修法：用 tempfile 自建基因库并把 mod.SANDBOX 指过去，忠实模拟。
+    tmp = Path(tempfile.mkdtemp(prefix="sig-test-"))
+    try:
+        (tmp / "genes").mkdir()
+        (tmp / "genes" / "genes-t.json").write_text(json.dumps({
+            "schema": "pgg-evolution/gene-bank/v1",
+            "genes": [
+                {"id": "gene_repair_probe", "category": "repair",
+                 "signals_match": ["发现故障或缺陷", "子系统报错/不可用"],
+                 "mechanism": "发现故障时必须先定位根因再修", "strategy": ["定位", "修复"]},
+                {"id": "gene_canonical_probe", "category": "optimize",
+                 "signals_match": ["需要更新 PGG-WIKI / 外置大脑正本"],
+                 "mechanism": "正本变更必须走 staging 单通道", "strategy": ["staging"]},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        mod.SANDBOX = tmp
+
+        r = mod.match_genes("本地检索系统故障 修复", top_n=3)
+        assert r["status"] == "OK", f"临时基因库存在时必须能匹配: {r}"
+        assert r["matched"] > 0, r
+        # 有信号命中的基因必须回传 _signal_overlap（不能只算不说）
         with_ov = [g for g in r["genes"] if g.get("_signal_overlap")]
-        assert with_ov, f"有信号命中的基因必须回传 _signal_overlap: {r['genes'][:1]}"
+        assert with_ov, f"有信号命中的基因必须回传 _signal_overlap: {r['genes']}"
+        assert "error" in with_ov[0]["_signal_overlap"], with_ov[0]
+
+        # 正本任务应命中 pgg_ 本地扩展信号
+        r2 = mod.match_genes("需要更新 PGG-WIKI 正本", top_n=3)
+        ov2 = [s for g in r2["genes"] for s in (g.get("_signal_overlap") or [])]
+        assert "pgg_canonical_write_intent" in ov2, f"正本任务应命中本地扩展信号: {ov2}"
+
+        # 空基因库 → BLOCKED（而非崩溃/静默空结果）
+        (tmp / "genes" / "genes-t.json").unlink()
+        r3 = mod.match_genes("任意任务", top_n=3)
+        assert r3["status"] == "BLOCKED", f"空库必须显式 BLOCKED: {r3}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     print("✓ 信号归一：APEX 24 标准 + 本地扩展可区分，未映射不丢弃，匹配 overlap 可审计")
 
