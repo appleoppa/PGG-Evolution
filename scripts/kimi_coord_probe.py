@@ -32,6 +32,20 @@ BIN = os.environ.get("KIMI_CU_BIN") or "/Applications/KimiCU.app/Contents/MacOS/
 KIMI_BIN = BIN  # 别名（diagnose_service 用）
 
 
+def _run_capture(cmd: list[str], timeout: int = 15,
+                 **kw) -> subprocess.CompletedProcess | None:
+    """安全跑外部命令。非 macOS 环境（如 CI ubuntu）缺 osascript/launchctl/
+    screencapture 时会抛 FileNotFoundError，**不得让它崩栈**——应返回 None
+    由调用方当作「取不到」处理（fail-closed，不冒充成功）。
+    2026-09-20 CI 实测暴露：window_geometry() 在 Linux 直接崩栈。
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout, **kw)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def mcp(name: str, args: dict, timeout: int = 30) -> dict:
     """调 kimi-cu MCP。任何异常（二进制不存在/超时/输出非 JSON）都 fail-closed
     返回错误字典，不得向上抛——否则在无 kimi-cu 的环境（如 CI）会崩栈，
@@ -130,7 +144,9 @@ def window_geometry(app_name: str | None = None) -> dict | None:
       return ""
     end tell
     '''
-    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    r = _run_capture(["osascript", "-e", script])
+    if r is None:
+        return None
     out = r.stdout.strip()
     if not out or "|" not in out:
         return None
@@ -203,7 +219,9 @@ def diagnose_service() -> dict:
     out = {"service_loaded": False, "service_pid": None,
            "kimi_screenshot_ok": None, "host_screen_capture_ok": None}
     try:
-        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+        r = _run_capture(["launchctl", "list"], timeout=10)
+        if r is None:
+            return out  # 非 macOS：服务状态不可知，保持 fail-closed 默认
         for ln in r.stdout.splitlines():
             if "ai.kimi.cu.service" in ln:
                 parts = ln.split()
@@ -237,9 +255,9 @@ def diagnose_service() -> dict:
     # 仅作参考：宿主进程自身的截图权限（**与 kimi-cu 无关**，不得用来代替上面）
     try:
         probe = "/tmp/kimi_coord_screencapture_probe.png"
-        r = subprocess.run(["screencapture", "-x", probe], capture_output=True, text=True, timeout=15)
+        r = _run_capture(["screencapture", "-x", probe], timeout=15)
         import os as _os
-        ok = r.returncode == 0 and _os.path.exists(probe)
+        ok = bool(r) and r.returncode == 0 and _os.path.exists(probe)
         out["host_screen_capture_ok"] = ok
         if _os.path.exists(probe):
             _os.remove(probe)
