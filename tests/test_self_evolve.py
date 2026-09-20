@@ -1030,6 +1030,59 @@ def test_promotion_authority_matrix_read_only_and_fail_closed() -> None:
     print("✓ 晋升矩阵：只读拦写/fail-closed/高风险必人工/证据不齐全 WATCH")
 
 
+def test_signal_taxonomy_match_is_auditable() -> None:
+    """信号归一与匹配：吸收自资源盘 APEX 基因标准 §4.2。
+
+    规范原文：`selected_gene = argmax(gene ∈ candidate_pool) { signal_match_score }`
+    ——信号匹配应是主判据，而非字符包含数量。本库基因的 signals_match 历史上
+    写成中文自然语言长句，无法精确匹配。
+
+    核心不变式：
+      ① 标准信号归一必须可工作（中文长句 → 机器可匹配键）
+      ② 归一不到的必须**原样保留**（不丢弃、不强加归属）
+      ③ 匹配结果的 overlap 必须**随结果回传**（可审计，不能只算不说）
+      ④ 本地扩展信号必须有前缀，不得冒充 APEX 标准信号
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_sig", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ① APEX 24 标准信号必须齐备，且不混入本地扩展
+    assert len(mod.SIGNAL_TAXONOMY) >= 24, f"APEX 标准信号应有 24 个: {len(mod.SIGNAL_TAXONOMY)}"
+    assert all(not k.startswith("pgg_") for k in mod.SIGNAL_TAXONOMY), \
+        "SIGNAL_TAXONOMY 不得混入本地扩展信号"
+
+    # ② 本地扩展必须带 pgg_ 前缀（可区分，不冒充标准）
+    merged = mod._all_signal_tables()
+    local = [k for k in merged if k.startswith("pgg_")]
+    assert local, "应有本地扩展信号"
+    assert len(merged) == len(mod.SIGNAL_TAXONOMY) + len(local), "合并表应恰好是标准+本地"
+
+    # ③ 归一实测：中文长句 → 标准键
+    hits, unmapped = mod.normalize_signals(["发现故障或缺陷", "子系统报错/不可用"])
+    assert "error" in hits, f"「发现故障或缺陷」应归一到 error: {hits}"
+    assert unmapped == [], f"可归一的不应落入 unmapped: {unmapped}"
+
+    # ④ 归不到必须原样保留（不静默丢弃）
+    hits2, unm = mod.normalize_signals(["某个完全无法归类的生造信号xyz"])
+    assert hits2 == set(), hits2
+    assert unm == ["某个完全无法归类的生造信号xyz"], f"未映射项必须原样保留: {unm}"
+
+    # ⑤ 字符类型输入也要能处理（不崩栈）
+    assert mod.normalize_signals("发现故障")[0] == {"error"}, "字符串输入应等同单元素列表"
+    assert mod.normalize_signals(None) == (set(), []), "None 应安全返回空"
+
+    # ⑥ 匹配结果必须回传 overlap（可审计）
+    r = mod.match_genes("本地检索系统故障 修复", top_n=3)
+    assert r["status"] == "OK", r
+    if r.get("genes"):
+        with_ov = [g for g in r["genes"] if g.get("_signal_overlap")]
+        assert with_ov, f"有信号命中的基因必须回传 _signal_overlap: {r['genes'][:1]}"
+
+    print("✓ 信号归一：APEX 24 标准 + 本地扩展可区分，未映射不丢弃，匹配 overlap 可审计")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1112,6 +1165,7 @@ def main() -> None:
     test_permission_doctor_gives_actionable_attribution()
     test_host_capture_probe_never_uses_hidden_filename()
     test_promotion_authority_matrix_read_only_and_fail_closed()
+    test_signal_taxonomy_match_is_auditable()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
