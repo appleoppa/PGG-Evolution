@@ -166,11 +166,16 @@ def main() -> int:
         print("         一切调用都会返回 'perform failed after retries'。")
 
     print(f"\n② KimiCU 屏幕录制权限（ai.kimi.cu，真判据）")
-    if cap is True:
+    if not svc["loaded"]:
+        # 服务未加载时，kimi_capture_state() 拿不到真实结论（调用会 service unavailable）。
+        # 旧版直接报「✅ 可用」会误导（与 ①❌ 矛盾）；改报「前置未满足，无法判定」。
+        print("   ⏸ 未判定 —— 服务未加载，kimi-cu 调用必失败，权限无法真实生效")
+        print("   → 先执行上方 ① 的修复命令，再重跑本工具。")
+    elif cap is True:
         print("   ✅ 可用 —— 坐标校正探针可以实测")
     elif cap is None:
-        print("   ? 无法判定（服务未加载，或当前无任何 app 可截图）")
-        print("   → 先确保服务已加载且有 app 窗口，再重跑本工具。")
+        print("   ? 无法判定（服务已加载但当前无任何 app 可截图）")
+        print("   → 先开一个有窗口的 app，再重跑本工具。")
     else:
         print("   ❌ 不可用 —— KimiCU.app 未获屏幕录制权限")
         print("\n   → 需人工授权（我无法自行授予）：")
@@ -189,12 +194,17 @@ def main() -> int:
         print("       不影响 kimi-cu（两者是不同的 TCC 主体，实测 authValue 分别为 0 与 2）。")
 
     print("\n" + "=" * 68)
+    # 判定顺序修正（2026-09-20 实测）：服务是截图的前提——服务停止后 kimi-cu
+    # 调用直接报 'service unavailable: perform failed after retries'。
+    # 旧版把 cap 判定放在最前，导致「服务未加载但权限可测」时先报「权限就绪」
+    # 并 return 0，与上文 ①❌ 自相矛盾（CI 模拟实测复现）。
+    if not svc["loaded"]:
+        print("结论：服务未加载 —— 这是前置阻塞，先加载服务再谈权限")
+        print("       （服务未加载时 kimi-cu 调用必失败，权限状态无法真实生效）")
+        return 2
     if cap is True:
         print("结论：权限就绪 → 可跑 python3 scripts/kimi_coord_probe.py 实测坐标校正")
         return 0
-    if not svc["loaded"]:
-        print("结论：先加载服务，再处理屏幕录制权限")
-        return 2
     if cap is None:
         print("结论：无法判定（服务已加载但无 app 可截图，请先开一个有窗口的 app）")
         return 2
