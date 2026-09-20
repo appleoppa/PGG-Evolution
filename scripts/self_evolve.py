@@ -262,6 +262,39 @@ D07_ALLOWED_CONTEXT = ("HISTORICAL", "ARCHIVED", "INVALID_EXAGGERATED", "拒绝�
                        "剔除", "不吸收", "假货", "驳回", "须降级", "不可采纳",
                        "标记为", "标为", "驳回理由", "剔除理由", "技术上不可能")
 
+# 元讨论标记：命中处在「讨论排除词表本身」的段落里（扫描器/词表/模式/命中/漏网…）。
+# 依据 D07 §4.1「或明确引文定位」——讨论词表的文本是在引用，不是在主张。
+D07_META_CONTEXT = ("扫描器", "词表", "模式", "正则", "命中", "漏了", "漏网",
+                    "pattern", "claim-scan", "排除词", "违规", "假阳性")
+
+# CJK/西文引号：命中落在引号内 = 引文定位（D07 §4.1）
+_QUOTE_CHARS = "「」“”‘’\"'`"
+
+
+def _inside_quotes(text: str, start: int, end: int) -> bool:
+    """命中是否落在成对引号内（向前找最近引号，判断是开引号还是闭引号）。"""
+    seg = text[max(0, start - 200):start]
+    for open_q, close_q in (("「", "」"), ("“", "”"), ("‘", "’"), ('"', '"'), ("`", "`")):
+        if open_q == close_q:
+            if seg.count(open_q) % 2 == 1:
+                return True
+        else:
+            # 最近出现的引号字符是开引号 → 命中在引号内
+            last_open = seg.rfind(open_q)
+            last_close = seg.rfind(close_q)
+            if last_open > last_close:
+                return True
+    return False
+
+
+def _paragraph_of(text: str, pos: int) -> str:
+    """取命中点所在段落（以空行分隔）。"""
+    lo = text.rfind("\n\n", 0, pos)
+    lo = 0 if lo == -1 else lo + 2
+    hi = text.find("\n\n", pos)
+    hi = len(text) if hi == -1 else hi
+    return text[lo:hi]
+
 
 def _context_is_allowed(text: str, start: int, end: int, window: int) -> bool:
     """判定命中处是否处于允许语境。
@@ -296,6 +329,13 @@ def _context_is_allowed(text: str, start: int, end: int, window: int) -> bool:
     if tbl_lo != -1:
         hdr_start = text.rfind("\n", 0, tbl_lo) + 1
         if any(mark in text[hdr_start:line_hi] for mark in D07_ALLOWED_CONTEXT):
+            return True
+
+    # ⑤ 元讨论：命中在引号内，且所在段落或邻近行在讨论词表本身
+    if _inside_quotes(text, start, end):
+        para = _paragraph_of(text, start)
+        if any(mark in para for mark in D07_META_CONTEXT) or \
+           any(mark in text[line_lo:line_hi] for mark in D07_META_CONTEXT):
             return True
     return False
 

@@ -549,6 +549,15 @@ def test_d07_claim_scanner_and_false_positive() -> None:
     rr = subprocess.run([sys.executable, str(SCRIPT), "--claim-scan", "实现并经局部验证，未做部署"],
                         capture_output=True, text=True)
     assert rr.returncode == 0, rr.stdout[:200]
+    # ⑥ 引文定位（D07 §4.1「明确引文定位」）：讨论词表本身的文本不得假阳性
+    r = mod.scan_claim_text(
+        "**补全同义变体**：第一版扫描玄学原文只得 2 条，漏了「修正模型底层权重」"
+        "「全品类LLM推理流程强制」等。")
+    assert r["status"] == "OK", f"讨论词表本身的引文被误拦: {r['details'][:2]}"
+    # 但引号外、无元讨论语境的同一短语必须仍被拦
+    r = mod.scan_claim_text("本系统已实现零幻觉，完全自治，自动改权重。")
+    assert r["status"] == "BLOCKED", r
+    assert r["violations"] >= 3, r
     print("✓ D07 扫描器：拦夸大/放诚实/不误拦引用拒绝语境；D05 未接线误报必拦")
 
 
