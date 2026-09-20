@@ -517,16 +517,20 @@ def test_permission_doctor_gives_actionable_attribution() -> None:
     assert doc.is_file(), f"诊断工具不存在: {doc}"
     r = subprocess.run([sys.executable, str(doc)], capture_output=True, text=True, timeout=90)
     out = r.stdout
-    # 必须报服务状态与权限状态两项
+    # 必须报服务状态 + KimiCU 权限（真判据）+ 宿主权限（仅参考）三项
     assert "服务" in out and "屏幕录制权限" in out, out[:400]
-    # 退出码必须落在契约内（0 就绪 / 2 服务未加载 / 3 无权限）
+    # 退出码必须落在契约内（0 就绪 / 2 服务未加载或无法判定 / 3 无权限）
     assert r.returncode in (0, 2, 3), f"退出码越界: {r.returncode}\n{out[:300]}"
     # 不可用时必须给可执行指引，不得只说「失败」
     if r.returncode != 0:
         assert ("launchctl" in out or "系统设置" in out), f"缺可执行指引: {out[:400]}"
-    # 宿主链必须被回溯（用于告诉用户给哪个 app 授权）
-    assert "宿主链" in out or "权限就绪" in out, out[:400]
-    print("✓ 权限诊断：区分服务未加载/无屏幕录制权限，并给可执行授权指引")
+    # 2026-09-20 修正：必须区分「KimiCU 主体」与「宿主主体」两个不同 TCC 主体。
+    # 旧版用 screencapture（宿主）判 kimi-cu 权限 → 测错主体，已修。
+    assert "ai.kimi.cu" in out, out[:400]
+    assert "仅参考" in out, f"宿主权限项必须标为仅参考: {out[:400]}"
+    # 必须明确不得用宿主权限代替 kimi-cu 权限（防回归到错误归因）
+    assert "不得代替" in out or "与 kimi-cu 无关" in out, out[:400]
+    print("✓ 权限诊断：区分 KimiCU 主体/宿主主体，且不拿宿主权限冒充 kimi-cu 权限")
 
 
 def test_gate_l3_feature_mode_requires_verifiable_entry() -> None:
