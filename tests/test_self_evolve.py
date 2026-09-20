@@ -530,7 +530,41 @@ def test_permission_doctor_gives_actionable_attribution() -> None:
     assert "仅参考" in out, f"宿主权限项必须标为仅参考: {out[:400]}"
     # 必须明确不得用宿主权限代替 kimi-cu 权限（防回归到错误归因）
     assert "不得代替" in out or "与 kimi-cu 无关" in out, out[:400]
+    # 2026-09-20 修正：宿主权限项必须标注「真判据 = 实跑 screencapture」。
+    # 背景：面板开关显示「开」≠ 授权生效（系统会弹指纹/密码认证框，
+    # 开关已变 1 但改动未提交）——必须实跑才能判。
+    assert "真判据" in out or "实跑" in out, out[:400]
     print("✓ 权限诊断：区分 KimiCU 主体/宿主主体，且不拿宿主权限冒充 kimi-cu 权限")
+
+
+def test_host_capture_probe_never_uses_hidden_filename() -> None:
+    """行为：宿主截图探针不得用隐藏文件名（. 开头）——screencapture 拒写。
+
+    2026-09-20 实测真 bug：探针文件为 `/tmp/.kimi_perm_doctor_probe.png`，
+    screencapture 报 'cannot write file to intended destination' **但返回码仍为 0**，
+    导致授权已生效时工具仍误报「宿主权限不可用」。
+
+    必须锁死：① 探针文件名不以点开头；② 判定同时校验文件存在且非空
+    （不能只看 returncode）。
+    """
+    doc = Path(__file__).resolve().parent.parent / "scripts" / "kimi_permission_doctor.py"
+    src = doc.read_text(encoding="utf-8")
+    # ① 不得用隐藏文件名（/tmp/.xxx）
+    assert '"/tmp/.' not in src and "'/tmp/." not in src, "探针文件名不得以点开头"
+    # ② 必须同时校验存在 + 非空（防「返回码 0 但没写文件」误判）
+    assert "probe.exists()" in src and "st_size > 0" in src, "必须校验文件存在且非空"
+    # ③ 必须能识别「等待认证」弹框（开关=1 但改动未提交）
+    assert "正在尝试修改" in src, "必须识别等待认证的弹框"
+    assert "pending_auth_prompt" in src, "缺 pending_auth_prompt 检测函数"
+
+    # 行为验证：两函数都真实可调用
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pd_hidden", doc)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert isinstance(mod.pending_auth_prompt(), bool), "pending_auth_prompt 必须返回 bool"
+    assert isinstance(mod.host_screen_capture_state(), bool), "host_screen_capture_state 必须返回 bool"
+    print("✓ 宿主截图探针：不用隐藏文件名，且校验文件存在非空（防返回码 0 误判）")
 
 
 def test_permission_doctor_no_contradiction_when_service_down() -> None:
@@ -557,8 +591,11 @@ def test_permission_doctor_no_contradiction_when_service_down() -> None:
     # 服务不可见时：必须非零，且不得出现「权限就绪」这类肯定结论
     assert r.returncode != 0, f"服务未加载时不得报成功: rc={r.returncode}\n{out[:300]}"
     assert "结论：权限就绪" not in out, f"服务未加载却报权限就绪（自相矛盾）: {out[:400]}"
-    # 不得在服务未加载时报「✅ 可用」（会与 ①❌ 矛盾）
-    assert "✅ 可用" not in out, f"服务未加载却报权限可用: {out[:400]}"
+    # ② 项不得在服务未加载时报「✅ 可用」（会与 ①❌ 矛盾）。
+    # 注意：③ 宿主权限是独立事实，服务未加载时它仍可能可用——不得一并禁掉。
+    # 用标题锚定 ② 段落，而非全文搜「✅ 可用」（会误伤 ③）。
+    seg2 = out.split("② ", 1)[1].split("③ ", 1)[0] if "② " in out and "③ " in out else ""
+    assert "✅ 可用" not in seg2, f"服务未加载时 ② 项不得报可用: {seg2[:250]}"
     # 必须明确指出服务是前置阻塞
     assert "服务未加载" in out or "未判定" in out, out[:400]
     print("✓ 服务未加载时诊断不报「权限就绪」（消除自相矛盾，服务为前置阻塞）")

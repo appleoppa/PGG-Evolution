@@ -103,8 +103,18 @@ def host_screen_capture_state() -> bool:
 
     保留此函数仅用于诊断「为什么本脚本的 screencapture 也不行」，
     不得用它代替 kimi_capture_state() 判定 kimi-cu 权限。
+
+    ⚠️ 2026-09-20 实测教训：此函数的返回值是**唯一真判据**。
+    面板开关显示为「开」不等于授权已生效——当时 node 开关已从 0 变 1，
+    但系统弹出了指纹/密码认证框（AXSheet「正在尝试修改你的系统设置」），
+    实际改动尚未提交，screencapture 仍返回 'could not create image from display'。
+    只看开关字段会误报「授权成功」——必须实跑本函数才算数。
+
+    ⚠️ 另一个实测陷阱：探针文件名**不能以点开头**。screencapture 会拒写隐藏文件
+    （stderr: 'cannot write file to intended destination'）**但返回码仍为 0**，
+    仅看 returncode 会误判为「无权限」。本函数同时校验**文件存在且非空**。
     """
-    probe = Path("/tmp/.kimi_perm_doctor_probe.png")
+    probe = Path("/tmp/kimi_perm_doctor_probe.png")  # 不得用隐藏文件名
     try:
         r = _run(["screencapture", "-x", str(probe)])
         ok = r.returncode == 0 and probe.exists() and probe.stat().st_size > 0
@@ -113,6 +123,28 @@ def host_screen_capture_state() -> bool:
         return ok
     except OSError:
         return False
+
+
+def pending_auth_prompt() -> bool:
+    """检测系统设置是否弹出了「正在尝试修改你的系统设置」等待认证的弹框。
+
+    2026-09-20 实测：此弹框存在时，面板开关可能已显示为「开」，
+    但 TCC 授权**尚未落库**，screencapture 仍会失败。区分「已授权」
+    与「开关动了但等认证」的关键信号。
+    """
+    script = (
+        'tell application "System Events" to tell process "系统设置"\n'
+        '  set out to ""\n'
+        '  repeat with sh in (every sheet of window 1)\n'
+        '    repeat with st in (every static text of sh)\n'
+        '      set out to out & (value of st as string) & "\\n"\n'
+        '    end repeat\n'
+        '  end repeat\n'
+        '  return out\n'
+        'end tell'
+    )
+    r = _run(["osascript", "-e", script], timeout=20)
+    return "正在尝试修改" in (r.stdout or "")
 
 
 def host_chain() -> list[dict]:
@@ -186,12 +218,22 @@ def main() -> int:
         print(f"     launchctl kickstart -k gui/$(id -u)/{SERVICE_LABEL}")
         print("     pkill -f 'kimi-cu mcp'   # 杀掉旧 MCP 进程（否则仍缓存旧权限）")
 
-    print(f"\n③ 本脚本宿主屏幕录制权限（仅参考）")
+    print(f"\n③ 宿主屏幕录制权限（真判据 = 实跑；但相对 kimi-cu 仅参考）")
     print(f"   {'✅ 可用' if host_cap else '❌ 不可用'}"
           "  ← 这是 node/pi-web 的权限，与 kimi-cu 无关，不得代替第②项")
     if not host_cap:
-        print("   注：宿主链中承载本脚本的进程若也无权限，只影响本脚本自己的 screencapture，")
-        print("       不影响 kimi-cu（两者是不同的 TCC 主体，实测 authValue 分别为 0 与 2）。")
+        # 2026-09-20 实测：开关显示「开」≠ 授权已生效。面板开关动过后系统会弹
+        # 指纹/密码认证框，此时开关已变 1 但授权未落库，screencapture 仍失败。
+        if pending_auth_prompt():
+            print("   ⚠️ 检测到系统设置弹出了**等待认证**的弹框")
+            print("      → 面板开关可能已显示为「开」，但授权**尚未提交**")
+            print("      → 请在该弹框按指纹（触控 ID）或点「使用密码…」完成认证")
+            print("      → 认证后重启宿主进程，TCC 在进程启动时读取权限")
+        else:
+            print("   注：宿主链中承载本脚本的进程若也无权限，只影响本脚本自己的 screencapture，")
+            print("       不影响 kimi-cu（两者是不同的 TCC 主体）。")
+        print("   → 授权入口：系统设置 → 隐私与安全性 → 屏幕录制 → 找到 **node**")
+        print("      （TCC 主体是 node 二进制本身，不是 pi-web 这个名称）")
 
     print("\n" + "=" * 68)
     # 判定顺序修正（2026-09-20 实测）：服务是截图的前提——服务停止后 kimi-cu
