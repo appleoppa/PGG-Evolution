@@ -533,6 +533,112 @@ def test_permission_doctor_gives_actionable_attribution() -> None:
     print("✓ 权限诊断：区分 KimiCU 主体/宿主主体，且不拿宿主权限冒充 kimi-cu 权限")
 
 
+def test_permission_doctor_no_contradiction_when_service_down() -> None:
+    """行为：服务未加载时，诊断结论不得与 ① 自相矛盾。
+
+    2026-09-20 实测复现的真 bug：服务未加载（①❌）但结论报「权限就绪」exit=0。
+    根因：判定顺序把 cap 放最前。实测证明服务是截图前提——服务停止后
+    kimi-cu 调用直接报 'service unavailable: perform failed after retries'。
+    修法：先判服务，服务未加载则不得输出肯定结论。
+    """
+    doc = Path(__file__).resolve().parent.parent / "scripts" / "kimi_permission_doctor.py"
+    assert doc.is_file(), f"诊断工具不存在: {doc}"
+
+    # 模拟「服务不可见」：用 shim 遮蔽 launchctl，使其报空（= 未加载）
+    with tempfile.TemporaryDirectory() as td:
+        shim = Path(td) / "launchctl"
+        shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{td}{os.pathsep}{env.get('PATH', '')}"
+        r = subprocess.run([sys.executable, str(doc)], capture_output=True, text=True,
+                           timeout=90, env=env)
+    out = r.stdout
+    # 服务不可见时：必须非零，且不得出现「权限就绪」这类肯定结论
+    assert r.returncode != 0, f"服务未加载时不得报成功: rc={r.returncode}\n{out[:300]}"
+    assert "结论：权限就绪" not in out, f"服务未加载却报权限就绪（自相矛盾）: {out[:400]}"
+    # 不得在服务未加载时报「✅ 可用」（会与 ①❌ 矛盾）
+    assert "✅ 可用" not in out, f"服务未加载却报权限可用: {out[:400]}"
+    # 必须明确指出服务是前置阻塞
+    assert "服务未加载" in out or "未判定" in out, out[:400]
+    print("✓ 服务未加载时诊断不报「权限就绪」（消除自相矛盾，服务为前置阻塞）")
+
+
+def test_service_repair_diagnoses_plist_kinds_safely() -> None:
+    """行为：服务修复工具必须准确识别 plist 三类问题，且 dry-run 绝不改系统。
+
+    背景（2026-09-20 对照实验）：kimi-cu upgrade 会移除用户 plist，并从 app 内
+    恢复使用 BundleProgram 相对路径的版本；用户级 LaunchAgent 需绝对路径，
+    否则 bootstrap 报 exit=5（I/O error）。服务停止时 kimi-cu 调用报
+    'service unavailable'，故服务是截图前置依赖。
+
+    隔离：用临时 HOME 重定向 USER_PLIST，不碰真实 ~/Library/LaunchAgents。
+    """
+    import plistlib
+    script = Path(__file__).resolve().parent.parent / "scripts" / "kimi_cu_service_repair.py"
+    assert script.is_file(), f"修复工具不存在: {script}"
+
+    src = script.read_text(encoding="utf-8")
+    # 只做静态契约校验 + 纯逻辑单测（不执行真实 launchctl）
+    # ① dry-run 必须是默认（--apply 才动作）——防误改系统
+    assert '"--apply"' in src and "store_true" in src, "--apply 必须是显式开关"
+    assert "dry-run" in src, "默认必须 dry-run"
+    # ② 必须备份原 plist（可回滚）
+    assert "已备份原 plist" in src, "改 plist 前必须备份"
+    # ③ 必须区分三类 plist 问题
+    for kind in ("missing", "relative", "ok"):
+        assert kind in src, f"缺 plist 类型判定: {kind}"
+    # ④ 修复后必须复检服务状态（不得直接报成功）
+    assert "修复后服务仍未加载" in src, "修复后必须复检，不得直接报成功"
+
+    # 纯逻辑验证：在临时 HOME 下实例化模块，测 plist_diagnosis 三类判定
+    with tempfile.TemporaryDirectory() as home:
+        la = Path(home) / "Library" / "LaunchAgents"
+        la.mkdir(parents=True)
+        plist_path = la / "ai.kimi.cu.service.plist"
+        env = dict(os.environ)
+        env["HOME"] = home
+
+        def diag() -> str:
+            code = (
+                "import importlib.util,sys,json;"
+                f"spec=importlib.util.spec_from_file_location('r',r'{script}');"
+                "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+                "print(m.plist_diagnosis()['kind'])"
+            )
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                               text=True, timeout=30, env=env)
+            assert r.returncode == 0, f"诊断失败: {r.stderr[:300]}"
+            return r.stdout.strip()
+
+        # 场景 A：plist 不存在（升级后被移除）
+        assert diag() == "missing", "未识别 missing"
+        # 场景 B：相对路径（app 内原版，bootstrap 必失败）
+        plist_path.write_bytes(plistlib.dumps({
+            "Label": "ai.kimi.cu.service",
+            "BundleProgram": "Contents/MacOS/kimi-cu",
+            "ProgramArguments": ["Contents/MacOS/kimi-cu", "service"],
+            "MachServices": {"ai.kimi.cu.service": True},
+        }))
+        assert diag() == "relative", "未识别 relative（BundleProgram 相对路径）"
+        # 场景 C：绝对路径（健康）
+        plist_path.write_bytes(plistlib.dumps({
+            "Label": "ai.kimi.cu.service",
+            "ProgramArguments": ["/Applications/KimiCU.app/Contents/MacOS/kimi-cu", "service"],
+            "MachServices": {"ai.kimi.cu.service": True},
+        }))
+        assert diag() == "ok", "未识别 ok（绝对路径）"
+
+        # dry-run 在临时 HOME 下跑：必须非零（需修复）且不写任何文件
+        before = sorted(p.name for p in la.iterdir())
+        r = subprocess.run([sys.executable, str(script)], capture_output=True,
+                           text=True, timeout=60, env=env)
+        after = sorted(p.name for p in la.iterdir())
+        assert before == after, f"dry-run 不得改动文件系统: {before} → {after}"
+        assert "[dry-run]" in r.stdout or r.returncode == 0, r.stdout[:300]
+    print("✓ 服务修复：识别 missing/relative/ok 三类，默认 dry-run 不改系统")
+
+
 def test_gate_l3_feature_mode_requires_verifiable_entry() -> None:
     """行为：L3 feature 模式必须「可验证准入」，不得变成橡皮图章。
 
@@ -669,24 +775,36 @@ def test_coord_probe_distinguishes_env_from_bug() -> None:
 
     # 探针在环境不满足时必须返回非零（不得报 PASS）；环境满足时得 0 才算真过。
     # 2026-09-20 修正：原断言硬编码「必须非零」，但环境修好后探针本就该 exit=0，
-    # 那条断言会反过来把正常状态判成失败。改为**按环境分支**判定：
-    #   服务未加载 / 截图不可用 → 必须非零（不得报成功）
-    #   两者都就绪            → 必须为 0，且必须给出端到端点击验证结论
+    # 那条断言会反过来把正常状态判成失败。改为**按环境分支**判定。
+    #
+    # 关键：必须**忠实模拟**无 kimi-cu 环境（KIMI_CU_BIN 指向不存在路径）。
+    # 仅遮蔽 launchctl 不够——kimi-cu 仍可用，探针会真成功（实测发现）。
     r = subprocess.run([sys.executable, str(probe), "--app", "TextEdit"],
                        capture_output=True, text=True, timeout=120)
-    env_ready = diag["service_loaded"] and diag["kimi_screenshot_ok"] is True
-    if not env_ready:
+    # 环境判定必须基于**探针自己的输出**，而不是 diag——diag 可能被测试环境的
+    # shim（如遮蔽 launchctl）干扰，而 kimi-cu 本体仍可用。2026-09-20 实测：
+    # 遮蔽 launchctl 时 diag.service_loaded=False，但探针实际能跑通 exit=0。
+    probe_ok = ("坐标校正实测有效" in r.stdout) or ("✅ 端到端点击验证通过" in r.stdout)
+    if not probe_ok:
         # 环境不满足：探针必须在权限/服务层就中止，不得继续到点击验证。
         assert r.returncode != 0, f"环境不满足时探针不得报成功: rc={r.returncode}\n{r.stdout[:300]}"
-        # 不得在任何形式下宣称坐标已实测有效（原断言用 "不得报 PASS" 子串匹配，
-        # 但探针实际输出「不得凭猜测报 PASS」，子串不命中会假失败——2026-09-20
-        # CI(ubuntu) 实测暴露。改按**意图**判定：不出现肯定结论即可）。
         assert "坐标校正实测有效" not in r.stdout, r.stdout[:400]
         assert "✅ 端到端点击验证通过" not in r.stdout, r.stdout[:400]
     else:
         # 环境就绪：必须给出端到端点击验证结论（不得只凭「缩放比等比」就宣称坐标有效）
         assert "点击验证" in r.stdout, r.stdout[:400]
         assert r.returncode == 0, f"环境就绪时探针应成功: rc={r.returncode}\n{r.stdout[:300]}"
+
+    # 忠实模拟「无 kimi-cu」环境（CI ubuntu 场景）：探针必须优雅归因、非零退出，
+    # 且不得崩栈（旧版会抛 FileNotFoundError）。此断言与真实环境无关，恒可跑。
+    env_no_kimi = dict(os.environ)
+    env_no_kimi["KIMI_CU_BIN"] = "/nonexistent/kimi-cu-does-not-exist"
+    r2 = subprocess.run([sys.executable, str(probe), "--app", "TextEdit"],
+                        capture_output=True, text=True, timeout=120, env=env_no_kimi)
+    assert r2.returncode != 0, f"无 kimi-cu 时探针不得报成功: rc={r2.returncode}\n{r2.stdout[:300]}"
+    assert "Traceback" not in r2.stderr, f"探针崩栈（应 fail-closed 归因）: {r2.stderr[:300]}"
+    assert "坐标校正实测有效" not in r2.stdout, r2.stdout[:400]
+    assert ("服务" in r2.stdout or "权限" in r2.stdout or "图像" in r2.stdout), r2.stdout[:400]
     # 必须明确归因（服务/权限），不得只说「失败」
     assert ("服务" in r.stdout or "权限" in r.stdout), r.stdout[:300]
     # 硬规则：不得仅凭等比缩放就宣称坐标已实测有效（两种环境下都成立）
@@ -824,6 +942,8 @@ def main() -> None:
     test_gene_l5_constraints_derived_not_faked()
     test_gene_match_warns_on_missing_l5()
     test_permission_doctor_gives_actionable_attribution()
+    test_permission_doctor_no_contradiction_when_service_down()
+    test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
     test_d07_claim_scanner_and_false_positive()
     test_coord_probe_distinguishes_env_from_bug()
