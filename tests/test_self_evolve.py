@@ -992,6 +992,7 @@ def main() -> None:
     test_gene_l5_constraints_derived_not_faked()
     test_gene_match_warns_on_missing_l5()
     test_permission_doctor_gives_actionable_attribution()
+    test_host_capture_probe_never_uses_hidden_filename()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
