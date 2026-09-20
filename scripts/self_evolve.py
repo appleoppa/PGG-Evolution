@@ -27,6 +27,37 @@ SANDBOX = Path.home() / ".pi" / "agent" / "evolution"
 
 KILL_SWITCH = "SELF_EVOLUTION_PLUGIN_DISABLED"
 
+# 只读模式（吸收自 Apex 资源盘《超级进化21》：Agent_read ∩ ¬Agent_edit = Max(Safety)）
+# 该文主张：智能体仅保留配置读取权限，完全剥离自主修改权限，
+# 以 LLM 研判 + IDE 校验的分离分工保证稳定性。
+# 本引擎沙箱内写是允许的，但提供硬开关把「只读」变成可执行约束：
+#   PGG_EVOLUTION_READONLY=1 → 一切写盘动作被拦（拒绝类 exit=1）
+READONLY_SWITCH = "PGG_EVOLUTION_READONLY"
+
+
+class ReadOnlyViolation(RuntimeError):
+    """只读模式下尝试写盘。"""
+
+
+def is_readonly() -> bool:
+    return os.environ.get(READONLY_SWITCH) == "1"
+
+
+def require_write(what: str) -> None:
+    """写盘前调用。只读模式下一律拒绝——不静默跳过，直接抛错。"""
+    if is_readonly():
+        raise ReadOnlyViolation(
+            f"只读模式（{READONLY_SWITCH}=1）拒绝写入: {what}。"
+            "这是硬约束：如需写盘先显式取消该环境变量。"
+        )
+
+
+def safe_write_text(path: Path, text: str, what: str = "") -> None:
+    """统一写入口（带只读拦截）。所有沙箱写盘都应走这里。"""
+    require_write(what or str(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
 MODELS_JSON = Path.home() / ".pi" / "agent" / "models.json"
 
 # APEX 14 维模块（三顺序代入用）
@@ -535,8 +566,7 @@ def _save_feedback(fb: dict) -> None:
     fb["schema"] = "pgg-evolution/feedback/v1"
     fb["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     # 新环境（沙箱目录不存在）时自动建目录，否则首次 feedback 直接 FileNotFound 崩溃
-    SANDBOX.mkdir(parents=True, exist_ok=True)
-    (SANDBOX / "feedback.json").write_text(json.dumps(fb, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_text(SANDBOX / "feedback.json", json.dumps(fb, ensure_ascii=False, indent=2), "反馈库")
 
 
 def _load_deprecated_ids() -> set:
@@ -763,8 +793,7 @@ def prune_genes(threshold: float = 0.5, min_samples: int = 2, dry_run: bool = Fa
         ]
         + [{"gene_id": gid, "reason": "历史标记", "at": ""} for gid in existing],
     }
-    dep_file.parent.mkdir(parents=True, exist_ok=True)
-    dep_file.write_text(json.dumps(dep_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_text(dep_file, json.dumps(dep_payload, ensure_ascii=False, indent=2), "淘汰标记")
     return {
         "status": "OK",
         "threshold": threshold,
@@ -1161,7 +1190,7 @@ def collect_genes(task_name: str) -> dict:
         "genes": genes,
         "note": "基因=短板模式+修复动作，供跨任务复用（D12 元学习）",
     }
-    gene_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_text(gene_file, json.dumps(payload, ensure_ascii=False, indent=2), "基因库")
     return {"status": "OK", "task": task_name, "gene_count": len(genes), "gene_file": str(gene_file), "genes": genes}
 
 
@@ -1214,8 +1243,188 @@ def gene_llm(task_name: str, provider: str, model: str | None = None) -> dict:
         "genes": llm_genes,
         "note": "LLM 生成的可复用基因（需人工复核后入库）",
     }
-    gene_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_text(gene_file, json.dumps(payload, ensure_ascii=False, indent=2), "基因库")
     return {"status": "OK", "task": task_name, "gene_count": len(llm_genes), "gene_file": str(gene_file), "genes": llm_genes, "llm": True, "provider": provider, "model": resp["model"]}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 基因 L5 约束层（constraints / validation）
+# ══════════════════════════════════════════════════════════════════════
+#
+# 来源：Apex 资源盘《标准基因模版》给出的母体基因 5 层结构：
+#   L1 元(id/category) L2 触发(signals_match) L3 前置(preconditions)
+#   L4 执行(strategy) L5 约束(constraints/validation)
+#
+# 实测缺口：本库 53 条基因中 constraints=0、validation=0、preconditions=5。
+# 即基因只存了「怎么做」，没存「什么条件下别用」和「怎么验证做对了」——
+# 这正是「文件存在冒充能力完成」在基因层的同构缺陷。
+#
+# 设计原则（不得凭空编造）：
+#   1. 能从已有字段推导的（如策略里的回滚/备份步骤）→ 推导并标注来源
+#   2. 推导不出的 → 显式标 UNSPECIFIED，不假装有
+#   3. 复用时按缺失度给 confidence 警告，而非静默使用
+
+# 能从 strategy/mechanism 文本里可靠识别的约束信号（保守，宁少勿错）
+CONSTRAINT_DERIVE_RULES = (
+    {
+        "name": "rollback_required",
+        "pattern": r"回滚|回退|恢复(?:到|至)?(?:快照|备份|原状)|\.bak|备份",
+        "meaning": "该基因执行前必须准备可回滚手段",
+    },
+    {
+        "name": "readback_required",
+        "pattern": r"读回|验证|确认|核对|实测",
+        "meaning": "该基因执行后必须读回验证，未读回不算完成",
+    },
+    {
+        "name": "authorization_required",
+        "pattern": r"授权|审批|人工|门禁|确认后再|待批准",
+        "meaning": "该基因涉及门禁项，未授权必须冻结而非默默执行",
+    },
+    {
+        "name": "sandbox_only",
+        "pattern": r"沙箱|隔离|staging|候选区",
+        "meaning": "该基因只能在隔离区执行，不得直写正本/生产",
+    },
+    {
+        "name": "no_production_write",
+        "pattern": r"禁止.*(?:正本|生产|直写)|不得.*(?:正本|生产|直写)|只读",
+        "meaning": "该基因不得对正本或生产环境写入",
+    },
+)
+
+UNSPECIFIED = "UNSPECIFIED"
+
+
+def derive_gene_constraints(gene: dict) -> dict:
+    """从已有字段**推导**约束；推不出的显式标 UNSPECIFIED（不编造）。
+
+    返回 {"constraints": {...}, "derived_from": "text-derivation"|"none",
+          "unspecified": [...], "explicit": bool}
+
+    若基因已显式带 constraints，则以显式为准（显式 > 推导）。
+    """
+    existing = gene.get("constraints")
+    if isinstance(existing, dict) and existing:
+        return {"constraints": existing, "derived_from": "explicit",
+                "unspecified": [], "explicit": True}
+
+    haystack = " ".join([
+        str(gene.get("mechanism", "")),
+        " ".join(str(x) for x in (gene.get("strategy") or [])),
+        " ".join(str(x) for x in (gene.get("signals_match") or [])),
+        str(gene.get("resolution", "")),
+    ])
+    found, unspecified = {}, []
+    for rule in CONSTRAINT_DERIVE_RULES:
+        if re.search(rule["pattern"], haystack):
+            found[rule["name"]] = rule["meaning"]
+
+    # 环境约束：无沙箱/隔离信号的基因，环境边界未知
+    if "sandbox_only" not in found and "no_production_write" not in found:
+        unspecified.append("environment_scope")
+    # 前置条件：绝大多数基因没有
+    if not gene.get("preconditions"):
+        unspecified.append("preconditions")
+
+    return {"constraints": found, "derived_from": "text-derivation" if found else "none",
+            "unspecified": unspecified, "explicit": False}
+
+
+def derive_gene_validation(gene: dict) -> dict:
+    """推导验证标准。有显式 validation 用显式；否则按类型给**可执行**检查。
+
+    关键：给出的命令必须真能跑（不写假命令）。推不出就标 UNSPECIFIED。
+    """
+    existing = gene.get("validation")
+    if isinstance(existing, list) and existing:
+        return {"validation": existing, "derived_from": "explicit", "explicit": True}
+
+    gtype = str(gene.get("type") or gene.get("category") or "")
+    strategy = " ".join(str(x) for x in (gene.get("strategy") or []))
+    checks = []
+
+    # 通用可执行检查：基因文件本身必须仍是合法 JSON 且含必需字段
+    checks.append("python3 -c \"import json,glob;[json.load(open(f,encoding='utf-8')) for f in glob.glob('genes/genes-*.json')];print('gene bank parses OK')\"")
+
+    if re.search(r"读回|验证|确认|核对|实测", strategy + str(gene.get("mechanism", ""))):
+        checks.append("执行后读回目标文件并比对预期（命中数≥1 且内容一致）")
+    if re.search(r"备份|\.bak", strategy + str(gene.get("mechanism", ""))):
+        checks.append("确认备份文件已生成且非空（ls -l <target>.bak-*）")
+    if gtype in ("gap",):
+        checks.append("确认缺口已复现（有 reproduction 记录），未复现不得标记已修复")
+
+    return {"validation": checks, "derived_from": "type-template", "explicit": False,
+            "note": "模板推导的检查；未与真实产物绑定时不得声称已通过"}
+
+
+def gene_l5_report(genes: list[dict] | None = None) -> dict:
+    """基因库 L5 完整度审计：逐条给出推导后的约束/验证 + 缺口统计。只读。"""
+    genes = _load_gene_bank() if genes is None else genes
+    rows, miss_c = [], 0
+    miss_v = 0
+    for g in genes:
+        c = derive_gene_constraints(g)
+        v = derive_gene_validation(g)
+        if not c["explicit"]:
+            miss_c += 1
+        if not v["explicit"]:
+            miss_v += 1
+        rows.append({
+            "gene": _gene_key(g),
+            "constraints_source": c["derived_from"],
+            "constraints": c["constraints"],
+            "unspecified": c["unspecified"],
+            "validation_source": v["derived_from"],
+            "validation_count": len(v["validation"]),
+        })
+    total = len(genes)
+    return {
+        "status": "OK", "total": total,
+        "explicit_constraints": total - miss_c, "derived_constraints": miss_c,
+        "explicit_validation": total - miss_v, "derived_validation": miss_v,
+        "l5_gap": {
+            "constraints_explicit_pct": round((total - miss_c) / total * 100, 1) if total else 0.0,
+            "validation_explicit_pct": round((total - miss_v) / total * 100, 1) if total else 0.0,
+        },
+        "boundary": "推导值来自文本规则，不等于作者本意；显式字段为 0 是真实缺口，不得当已完成",
+        "rows": rows,
+    }
+
+
+def gene_l5_backfill(dry_run: bool = True) -> dict:
+    """把推导出的 L5 回填进基因文件（默认 dry-run）。
+
+    回填只写 derived 标记字段（_l5_constraints/_l5_validation/_l5_derived），
+    **不伪造** constraints/validation 本体——原字段仍为空，保持缺口可见。
+    """
+    genes_dir = SANDBOX / "genes"
+    files = sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []
+    touched, planned = 0, []
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        changed = False
+        for g in d.get("genes", []):
+            c = derive_gene_constraints(g)
+            v = derive_gene_validation(g)
+            if not c["explicit"]:
+                g["_l5_constraints"] = c["constraints"]
+                g["_l5_unspecified"] = c["unspecified"]
+                changed = True
+            if not v["explicit"]:
+                g["_l5_validation"] = v["validation"]
+                changed = True
+        if changed:
+            planned.append({"file": f.name, "genes": len(d.get("genes", []))})
+            if not dry_run:
+                f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                touched += 1
+    return {"status": "OK", "dry_run": dry_run, "files": planned,
+            "files_written": touched if not dry_run else 0,
+            "note": "回填 _l5_* 派生字段，不填 constraints/validation 本体（缺口保持可见）"}
 
 
 def _gene_key(g: dict) -> str:
@@ -1292,10 +1501,28 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
     if not top:
         return {"status": "OK", "task": task_desc, "matched": 0, "genes": [], "note": "无匹配基因，可新建闭环"}
     # 统一补 id：规则提取基因原本无 id，导致 feedback 记录 gene_id=None → prune 跳过 → 淘汰闭环断裂
-    return {"status": "OK", "task": task_desc, "matched": len(top), "genes": [
-        {**{k: g[k] for k in ("category", "mechanism", "signals_match", "strategy", "_source") if k in g},
-         "id": _gene_key(g)} for g in top
-    ], "note": "匹配基因供复用：参考 strategy 修复步骤，勿机械照搬（需人工复核）"}
+    out, warned = [], 0
+    for g in top:
+        c = derive_gene_constraints(g)
+        v = derive_gene_validation(g)
+        row = {**{k: g[k] for k in ("category", "mechanism", "signals_match", "strategy", "_source") if k in g},
+               "id": _gene_key(g)}
+        # L5 约束层：缺显式约束/验证时必须显式警告，不得静默复用
+        if not c["explicit"] or not v["explicit"]:
+            warned += 1
+            row["l5_warning"] = (
+                "本基因缺显式 L5（constraints/validation）——复用前必须自己确定："
+                "①什么条件下不该用 ②怎么验证做对了。推导值仅供参考，不是作者本意。"
+            )
+            row["l5_derived"] = {"constraints": c["constraints"],
+                                 "unspecified": c["unspecified"],
+                                 "validation": v["validation"],
+                                 "derived_from": f"{c['derived_from']}/{v['derived_from']}"}
+        out.append(row)
+    return {"status": "OK", "task": task_desc, "matched": len(top),
+            "l5_missing": warned, "genes": out,
+            "note": "匹配基因供复用：参考 strategy 修复步骤，勿机械照搬（需人工复核）；"
+                    f"{warned}/{len(top)} 条缺显式 L5 约束层"}
 
 
 def gene_sync(task_name: str) -> dict:
@@ -1335,7 +1562,7 @@ def gene_sync(task_name: str) -> dict:
         lines.append("")
     lines.append("## 记忆回流说明")
     lines.append("本文档由 pgg_self_evolution 基因同步生成，走 STAGING→审批→向量化标准管线。")
-    doc_path.write_text("\n".join(lines), encoding="utf-8")
+    safe_write_text(doc_path, "\n".join(lines), "结算文档")
     return {"status": "OK", "task": task_name, "gene_count": len(task_genes), "sync_doc": str(doc_path), "next": "跑 pgg-brain-stage-archives.py 颗粒化→operator 审批→embed 向量化"}
 
 
@@ -1399,7 +1626,7 @@ def gene_from_memory(topic: str, provider: str = "deepseek-v4-flash", model: str
         "genes": llm_genes,
         "note": "从记忆颗粒提炼的基因（B 向写回，需人工复核）",
     }
-    gene_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_write_text(gene_file, json.dumps(payload, ensure_ascii=False, indent=2), "基因库")
     return {"status": "OK", "task": topic, "matched_memory": len(rows), "gene_count": len(llm_genes), "gene_file": str(gene_file), "genes": llm_genes, "llm": True}
 
 
@@ -1425,12 +1652,14 @@ def main() -> int:
     ap.add_argument("--gene-sync", metavar="TASK", help="双向写回 A 向：基因→记忆颗粒（生成结算文档，走标准记忆管线）")
     ap.add_argument("--gene-from-memory", metavar="TOPIC", help="双向写回 B 向：记忆颗粒→基因（从记忆库检索经验，LLM 提炼基因）")
     ap.add_argument("--list-genes", action="store_true", help="列出基因库")
+    ap.add_argument("--gene-l5", action="store_true", help="基因 L5 约束层审计：逐条推导 constraints/validation 并统计缺口（只读）")
+    ap.add_argument("--gene-l5-backfill", action="store_true", help="回填推导的 L5 派生字段（默认 dry-run，需 --apply 才写盘）")
     ap.add_argument("--health-deep", action="store_true", help="Ψ 深度健康监测：基因库/记忆库/沙箱/反馈完整性")
     ap.add_argument("--no-memory", action="store_true", help="health-deep 跳过记忆库检查（CI/无记忆库环境用）")
     ap.add_argument("--feedback", nargs=3, metavar=("TASK_DESC", "OUTCOME", "GENE_ID"), help="Φ 记录基因复用反馈：success/failure（GENE_ID 可省略填 -）")
     ap.add_argument("--feedback-stats", action="store_true", help="Φ 反馈统计：按基因/总体复用成功率")
     ap.add_argument("--prune-genes", nargs="?", const="0.5", metavar="THRESHOLD", help="Φ 淘汰无效基因：失败率≥阈值(默认0.5)且样本≥2 标记 deprecated")
-    ap.add_argument("--dry-run", action="store_true", help="配合 --prune-genes：只报告影响范围，不写盘")
+    ap.add_argument("--apply", action="store_true", help="配合 --gene-l5-backfill：真写盘（否则 dry-run）")
     ap.add_argument("--gate", nargs="*", metavar="PATH", help="五层应用门禁 L1-L5 自检（无参时取 git 工作区变更；可显式传路径）")
     ap.add_argument("--gate-backup", metavar="DIR", help="--gate 的 L1 备份目录")
     ap.add_argument("--evidence", metavar="CLAIM_ID", help="登记一条主张的证据等级（需 --level；不满足最低要求则拒绝登记）")
@@ -1443,9 +1672,32 @@ def main() -> int:
     ap.add_argument("--evidence-status", nargs="?", const="", metavar="CLAIM_ID", help="读回证据链，派生允许的状态词（不带值=全部）")
     ap.add_argument("--list-levels", action="store_true", help="列出 E0-E9 证据等级及其能/不能证明什么")
     ap.add_argument("--include-deprecated", action="store_true", help="匹配/统计时包含已淘汰基因")
+    ap.add_argument("--dry-run", action="store_true", help="配合 --prune-genes：只报告影响范围，不写盘")
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
+
+    # 只读模式（PGG_EVOLUTION_READONLY=1）：按动作分类拦截写操作。
+    # 分三类：纯读（放行）/ 会写盘（拦）/ 可能写盘（拦，需显式解除只读）。
+    if is_readonly():
+        READONLY_BLOCKED = {
+            "init": args.init, "gene": args.gene, "gene_llm": args.gene_llm,
+            "gene_sync": args.gene_sync, "gene_from_memory": args.gene_from_memory,
+            "evidence": args.evidence, "feedback": args.feedback,
+            "prune_genes": args.prune_genes, "gate_backup": args.gate_backup,
+            "substitute": args.substitute, "llm": args.llm,
+        }
+        blocked = [k for k, v in READONLY_BLOCKED.items() if v not in (None, False)]
+        if args.gene_l5_backfill and args.apply:
+            blocked.append("gene_l5_backfill")
+        if blocked:
+            print(json.dumps({
+                "status": "READONLY_BLOCKED", "readonly": True, "env": READONLY_SWITCH,
+                "blocked_actions": blocked,
+                "reason": "只读模式拒绝写盘动作（Agent_read ∩ ¬Agent_edit = Max(Safety)）",
+                "hint": f"如需写盘：unset {READONLY_SWITCH}",
+            }, ensure_ascii=False, indent=2))
+            return 1
 
     if args.health:
         print(json.dumps(health_check(), ensure_ascii=False, indent=2))
@@ -1533,6 +1785,16 @@ def main() -> int:
     if args.gene_from_memory:
         print(json.dumps(gene_from_memory(args.gene_from_memory, args.llm_provider or "deepseek-v4-flash", args.llm_model), ensure_ascii=False, indent=2))
         return 0
+    if args.gene_l5:
+        rep = gene_l5_report()
+        print(json.dumps({k: v for k, v in rep.items() if k != "rows"}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.gene_l5_backfill:
+        r = gene_l5_backfill(dry_run=not args.apply)
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+
     if args.list_genes:
         genes_dir = SANDBOX / "genes"
         if not genes_dir.is_dir():

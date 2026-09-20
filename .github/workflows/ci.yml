@@ -70,6 +70,39 @@ jobs:
               print("F1-F7 行为验证通过（伪总分/无界/回执缺环/自证/门不全 全部被拦）")
           PY
 
+      - name: Verify gene L5 constraints and readonly mode (真拦截)
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          with tempfile.TemporaryDirectory() as home:
+              env = dict(os.environ, HOME=home)
+              # L5：审计必须如实报 0 显式覆盖（不得默认补齐）
+              r = subprocess.run([sys.executable, str(script), "--gene-l5"],
+                                 capture_output=True, text=True, env=env)
+              assert r.returncode == 0, r.stdout[:300]
+              d = json.loads(r.stdout)
+              assert d["explicit_constraints"] == 0, f"空库不得报有显式约束: {d}"
+              assert "不得当已完成" in d["boundary"], d
+              # 回填默认必须 dry-run
+              r = subprocess.run([sys.executable, str(script), "--gene-l5-backfill"],
+                                 capture_output=True, text=True, env=env)
+              assert json.loads(r.stdout)["dry_run"] is True, r.stdout[:200]
+              # 只读模式：写必拦 exit=1
+              ro = dict(env, PGG_EVOLUTION_READONLY="1")
+              r = subprocess.run([sys.executable, str(script), "--feedback", "t", "success", "-"],
+                                 capture_output=True, text=True, env=ro)
+              assert r.returncode == 1, f"只读下写动作必须 exit=1: rc={r.returncode}"
+              assert json.loads(r.stdout)["status"] == "READONLY_BLOCKED", r.stdout[:200]
+              # 只读模式：读必放行 exit=0
+              for rd in ("--health", "--gene-l5"):
+                  rr = subprocess.run([sys.executable, str(script), rd],
+                                      capture_output=True, text=True, env=ro)
+                  assert rr.returncode == 0, f"只读下 {rd} 必须放行: rc={rr.returncode}"
+              print("基因 L5 + 只读模式验证通过（显式覆盖为0如实报/回填默认dry-run/写拦读放）")
+          PY
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'

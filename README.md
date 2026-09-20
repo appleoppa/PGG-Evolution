@@ -56,6 +56,13 @@ python3 scripts/self_evolve.py --evidence-status CLM-001   # 读回并派生允�
 python3 scripts/evolution_units.py --list                 # 看七个单元
 python3 scripts/evolution_units.py --unit F3 --action total_score --payload '{}'
 # → BLOCKED（拒绝「总进化分」，不同量纲不得相加）
+
+# 8. 基因 L5 约束层 + 只读模式（详见 docs/GENE_L5.md）
+python3 scripts/self_evolve.py --gene-l5            # 审计：逐条推导约束/验证，统计显式覆盖缺口
+python3 scripts/self_evolve.py --gene-l5-backfill   # 回填派生字段（默认 dry-run）
+PGG_EVOLUTION_READONLY=1 python3 scripts/self_evolve.py --health   # 只读：读放行
+export PGG_EVOLUTION_READONLY=1 && python3 scripts/self_evolve.py --feedback x success -
+# → READONLY_BLOCKED（exit=1，写动作被拦）
 ```
 
 ## 目录结构
@@ -70,6 +77,7 @@ PGG-Evolution/
 │   ├── GATES.md         # 五层门禁 + 三重进化门禁
 │   ├── EVIDENCE.md      # 证据等级账本 E0-E9（可执行的诚实性内核）
 │   ├── UNITS.md         # F1-F7 控制单元（状态机 + 布尔硬门）
+│   ├── GENE_L5.md       # 基因 L5 约束层 + 只读模式
 │   └── USAGE.md         # 详细使用说明
 ├── scripts/
 │   └── self_evolve.py   # 自进化引擎（可执行，通用，不绑定宿主）

@@ -35,6 +35,18 @@ from pathlib import Path
 SANDBOX = Path.home() / ".pi" / "agent" / "evolution" / "units"
 KILL_SWITCH = "SELF_EVOLUTION_PLUGIN_DISABLED"
 
+# 只读模式（吸收自 Apex 资源盘《超级进化21》）：与 self_evolve.py 同一环境变量，
+# 两个引擎行为一致——只读时一切写盘被拦（拒绝类 exit=1）。
+READONLY_SWITCH = "PGG_EVOLUTION_READONLY"
+
+
+class ReadOnlyViolation(RuntimeError):
+    """只读模式下尝试写盘。"""
+
+
+def is_readonly() -> bool:
+    return os.environ.get(READONLY_SWITCH) == "1"
+
 # ══════════════════════════════════════════════════════════════════════
 # 共同契约（D02 §1.1）与硬门（D02 §1.2）
 # ══════════════════════════════════════════════════════════════════════
@@ -109,6 +121,13 @@ def _load_state() -> dict:
 
 
 def _save_state(st: dict) -> None:
+    # 只读模式（PGG_EVOLUTION_READONLY=1）硬拦：与 self_evolve 同一开关。
+    # 吸收自 Apex 资源盘《超级进化21》：Agent_read ∩ ¬Agent_edit = Max(Safety)。
+    if os.environ.get(READONLY_SWITCH) == "1":
+        raise ReadOnlyViolation(
+            f"只读模式（{READONLY_SWITCH}=1）拒绝写状态: {_state_path()}。"
+            "如需写盘先显式取消该环境变量。"
+        )
     SANDBOX.mkdir(parents=True, exist_ok=True)
     st["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     _state_path().write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1033,7 +1052,14 @@ def main() -> int:
                          ensure_ascii=False))
         return 2
 
-    result = fn(payload)
+    try:
+        result = fn(payload)
+    except ReadOnlyViolation as exc:
+        print(json.dumps({"status": "READONLY_BLOCKED", "readonly": True,
+                          "env": READONLY_SWITCH, "reason": str(exc),
+                          "hint": f"如需写盘：unset {READONLY_SWITCH}"},
+                         ensure_ascii=False, indent=2))
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     # 拒绝类结果返回非零，便于 CI/脚本判真拦
     return 0 if result.get("status") in ("OK", "PASS") else 1

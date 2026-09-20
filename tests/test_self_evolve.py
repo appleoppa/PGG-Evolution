@@ -442,6 +442,120 @@ def test_evidence_exaggeration_and_downgrade() -> None:
     print("✓ evidence 夸大词拦截 + 工件失效自动降级")
 
 
+def test_gene_l5_constraints_derived_not_faked() -> None:
+    """基因 L5 约束层（行为）：推导必须来自文本、推不出必须显式标 UNSPECIFIED。
+
+    对应真实缺口：本库 53 条基因 constraints=0 / validation=0（实测）。
+    关键约束：不得凭空编造约束。显式字段为 0 时不得报成已完成。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_l5", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 能从文本推出回滚+读回约束
+    g1 = {"mechanism": "改前先备份，改后读回确认", "strategy": ["备份为 .bak", "读回验证"],
+          "signals_match": ["修改文件"]}
+    c1 = mod.derive_gene_constraints(g1)
+    assert "rollback_required" in c1["constraints"], c1
+    assert "readback_required" in c1["constraints"], c1
+    assert c1["explicit"] is False, "推导不得冒充显式"
+
+    # 推不出环境边界时 → 必须显式标 UNSPECIFIED，不得默认安全
+    assert "environment_scope" in c1["unspecified"], c1
+    assert "preconditions" in c1["unspecified"], c1
+
+    # 显式 constraints 优先于推导
+    g2 = {"mechanism": "随便写", "constraints": {"custom": "作者本意"}}
+    c2 = mod.derive_gene_constraints(g2)
+    assert c2["explicit"] is True and c2["constraints"] == {"custom": "作者本意"}, c2
+    assert c2["unspecified"] == [], c2
+
+    # 无沙箱/只读信号的基因 → 不得假设它在沙箱内
+    g3 = {"mechanism": "做某件事"}
+    c3 = mod.derive_gene_constraints(g3)
+    assert "environment_scope" in c3["unspecified"], c3
+    assert not c3["constraints"], f"无信号不得编造约束: {c3}"
+
+    # 验证模板必须给可执行命令（不是占位文字）
+    v1 = mod.derive_gene_validation(g1)
+    assert v1["explicit"] is False, v1
+    assert any("python3 -c" in x for x in v1["validation"]), v1
+
+    # 回填默认 dry-run，且不伪造本体字段
+    bf = mod.gene_l5_backfill(dry_run=True)
+    assert bf["dry_run"] is True and bf["files_written"] == 0, bf
+    print("✓ 基因 L5 约束层：推导不冒充显式、推不出标 UNSPECIFIED、回填默认 dry-run")
+
+
+def test_gene_match_warns_on_missing_l5() -> None:
+    """行为：缺 L5 的基因被复用时必须显式警告，不得静默复用。"""
+    with tempfile.TemporaryDirectory() as home:
+        _seed_rule_genes(home, [{
+            "type": "gap", "source": "t.json", "module": "m",
+            "mechanism": "写入后未读回验证导致状态虚报",
+            "resolution": "写入后读回确认",
+        }], name="genes-l5-t.json")
+        d = run_in(["--match", "写入后未读回验证状态虚报"], home)
+        assert d["matched"] >= 1, d
+        assert d["l5_missing"] >= 1, f"缺 L5 必须计入警告数: {d}"
+        g = d["genes"][0]
+        assert "l5_warning" in g, f"缺 L5 的基因必须带警告: {g}"
+        assert "l5_derived" in g, g
+        assert "UNSPECIFIED" or g["l5_derived"]["unspecified"], g
+        assert "缺显式 L5" in d["note"], d["note"]
+    print("✓ 基因复用时缺 L5 必警告（不静默复用）")
+
+
+def test_readonly_mode_blocks_writes() -> None:
+    """只读模式（PGG_EVOLUTION_READONLY=1）：写动作必拦，读动作必放行。
+
+    吸收自 Apex 资源盘《超级进化21》：Agent_read ∩ ¬Agent_edit = Max(Safety)。
+    关键：只读不能是「文档里的声明」，必须是会拒绝的代码（exit=1）。
+    """
+    import importlib.util, os as _os
+    spec = importlib.util.spec_from_file_location("se_ro", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    env = {**_os.environ, mod.READONLY_SWITCH: "1"}
+
+    # ① 入口拦：写动作 exit=1 且状态为 READONLY_BLOCKED
+    r = subprocess.run([sys.executable, str(SCRIPT), "--feedback", "t", "success", "-"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 1, f"只读下写动作必须 exit=1: rc={r.returncode} {r.stdout[:200]}"
+    d = json.loads(r.stdout)
+    assert d["status"] == "READONLY_BLOCKED", d
+    assert "feedback" in d["blocked_actions"], d
+
+    # ② 读动作放行（exit=0）
+    for rd in ("--health", "--gene-l5", "--status"):
+        rr = subprocess.run([sys.executable, str(SCRIPT), rd],
+                            capture_output=True, text=True, env=env)
+        assert rr.returncode == 0, f"只读下 {rd} 必须放行: rc={rr.returncode}"
+
+    # ③ 兜底层：绕过入口直调写函数也必须拒绝（不静默跳过）
+    os.environ[mod.READONLY_SWITCH] = "1"
+    try:
+        target = mod.SANDBOX / "readonly-probe-should-not-exist.json"
+        raised = False
+        try:
+            mod.safe_write_text(target, "{}", "probe")
+        except mod.ReadOnlyViolation:
+            raised = True
+        assert raised, "只读下 safe_write_text 必须抛 ReadOnlyViolation"
+        assert not target.exists(), "只读下不得真的创建文件"
+    finally:
+        os.environ.pop(mod.READONLY_SWITCH, None)
+
+    # ④ 解除后恢复正常
+    r2 = subprocess.run([sys.executable, str(SCRIPT), "--gene-l5-backfill"],
+                        capture_output=True, text=True)
+    assert r2.returncode == 0, r2.stdout[:200]
+    assert json.loads(r2.stdout)["dry_run"] is True, "回填默认必须 dry-run"
+    print("✓ 只读模式：写必拦(exit=1)/读必放行/兜底层不静默跳过")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -519,6 +633,9 @@ def main() -> None:
     test_evidence_empty_file_and_single_run_rejected()
     test_evidence_state_derivation()
     test_evidence_exaggeration_and_downgrade()
+    test_gene_l5_constraints_derived_not_faked()
+    test_gene_match_warns_on_missing_l5()
+    test_readonly_mode_blocks_writes()
     test_gate_scans_untracked_files()
     test_feedback_record()
     test_feedback_invalid_outcome()
