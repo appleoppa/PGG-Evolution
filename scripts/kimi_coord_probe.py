@@ -25,6 +25,7 @@ import subprocess
 import sys
 
 BIN = "/Applications/KimiCU.app/Contents/MacOS/kimi-cu"
+KIMI_BIN = BIN  # 别名（diagnose_service 用）
 
 
 def mcp(name: str, args: dict, timeout: int = 30) -> dict:
@@ -91,16 +92,23 @@ def png_size(path: str) -> tuple[int, int] | None:
 
 
 def diagnose_service() -> dict:
-    """诊断 kimi-cu 服务与权限状态（区分「服务未加载」与「无屏幕录制权限」）。
+    """诊断 kimi-cu 服务与权限状态。
 
-    2026-09-20 实测根因：MCP 进程在，但 LaunchAgent `ai.kimi.cu.service` 未加载
-    → 调用返回 "service unavailable: perform failed after retries"。
-    修复：launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/ai.kimi.cu.service.plist
+    2026-09-20 实测根因（两层）：
+    ① MCP 进程在，但 LaunchAgent `ai.kimi.cu.service` 未加载
+       → 调用返回 "service unavailable: perform failed after retries"。
+       修复：launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/ai.kimi.cu.service.plist
+    ② **权限主体是 ai.kimi.cu（KimiCU.app），不是本脚本的宿主进程**。
+       实测 TCC 日志：
+         ai.kimi.cu  authValue=2（允许）
+         node        authValue=0（拒绝）
+       故**不能用 screencapture 判断 kimi-cu 权限**——那是两个不同主体。
+       早期版本拿 screencapture 当对照，导致权限已授予时仍误报不可用。
 
-    另一层：即使服务在，若宿主进程无屏幕录制权限，get_app_state(image) 返回空 content。
-    二者症状不同，必须分开报，否则会误判成代码 bug。
+    现改为直接调 kimi-cu 截图，用「AX 能读但图空」区分权限问题与无窗口。
     """
-    out = {"service_loaded": False, "service_pid": None, "screen_capture_ok": None}
+    out = {"service_loaded": False, "service_pid": None,
+           "kimi_screenshot_ok": None, "host_screen_capture_ok": None}
     try:
         r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
         for ln in r.stdout.splitlines():
@@ -110,18 +118,82 @@ def diagnose_service() -> dict:
                 out["service_pid"] = None if parts[0] == "-" else parts[0]
     except (OSError, subprocess.SubprocessError):
         pass
-    # 系统级截图对照：能区分「本进程无权限」与「kimi-cu 自身问题」
+
+    # 真权限判据：直接调 kimi-cu 截图，并**逐个 app 试**直到有一个出图。
+    # 关键区分：
+    #   · 有 app 能出图            → 截图权限 OK（真判据 True）
+    #   · 所有 app 都出不了图       → 权限被拦（False）
+    #   · 服务未加载 / 无法判定     → None（不得当可用）
+    # 2026-09-20 修正：旧版用 screencapture 判权限，那是 node 的主体，与 kimi-cu 无关。
+    out["probe_app"] = None
+    if out["service_loaded"]:
+        try:
+            probe_app = _pick_probe_app()
+            if probe_app:
+                out["kimi_screenshot_ok"] = True
+                out["probe_app"] = probe_app
+            else:
+                # 没有任何 app 能出图：再区分「无权限」与「全部无窗口」
+                # AX 能读 = 进程通信正常；此时截图空 ⇒ 更可能是权限
+                ax_ok = any(_kimi_call(b, "ax") for b in
+                            ["com.apple.TextEdit", "com.apple.finder", "com.google.Chrome"])
+                out["kimi_screenshot_ok"] = False if ax_ok else None
+        except Exception:
+            out["kimi_screenshot_ok"] = None
+
+    # 仅作参考：宿主进程自身的截图权限（**与 kimi-cu 无关**，不得用来代替上面）
     try:
         probe = "/tmp/kimi_coord_screencapture_probe.png"
         r = subprocess.run(["screencapture", "-x", probe], capture_output=True, text=True, timeout=15)
         import os as _os
         ok = r.returncode == 0 and _os.path.exists(probe)
-        out["screen_capture_ok"] = ok
+        out["host_screen_capture_ok"] = ok
         if _os.path.exists(probe):
             _os.remove(probe)
     except (OSError, subprocess.SubprocessError):
-        out["screen_capture_ok"] = False
+        out["host_screen_capture_ok"] = False
     return out
+
+
+def _pick_probe_app() -> str | None:
+    """选一个当前**真能截到图**的 app 做探针。
+
+    2026-09-20 实测：kimi-cu 对「无窗口」app 返回 `isError: true / no target app`
+    或空 content——这与「无权限」症状不同，但都表现为「无图」。
+    若只用固定 app 探测，会把「那个 app 没窗口」误判成「无权限」。
+    故改为逐个试，返回第一个能出图的 app。
+    """
+    candidates = ["com.apple.TextEdit", "com.apple.Terminal", "com.google.Chrome",
+                  "com.apple.Safari", "com.bytedance.macos.feishu", "com.apple.finder"]
+    try:
+        r = mcp("list_apps", {})
+        running = [a.get("bundle_id") for a in
+                   json.loads(r["result"]["content"][0]["text"])["apps"]]
+    except Exception:
+        running = []
+    # 先试候选里正在运行的，再试其他正在运行的
+    ordered = [c for c in candidates if c in running] + [b for b in running if b not in candidates]
+    for bid in ordered:
+        if _kimi_call(bid, "image"):
+            return bid
+    return None
+
+
+def _kimi_call(app: str, mode: str) -> bool:
+    """调 kimi-cu get_app_state，返回是否有实质内容。"""
+    try:
+        r = subprocess.run([KIMI_BIN, "mcp", "-s", "user"],
+                           input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                             "params": {"name": "get_app_state",
+                                                        "arguments": {"app": app, "mode": mode}}}) + "\n",
+                           capture_output=True, text=True, timeout=60)
+        d = json.loads(r.stdout.strip().splitlines()[0])
+        blocks = d.get("result", {}).get("content", [])
+        if mode == "image":
+            return any(b.get("type") == "image" and b.get("data") for b in blocks)
+        return any(b.get("type") == "text" and b.get("text") for b in blocks)
+    except Exception:
+        return False
 
 
 def main() -> int:
@@ -140,17 +212,24 @@ def main() -> int:
     diag = diagnose_service()
     svc = "✅ 已加载" + (f" (pid {diag['service_pid']})" if diag["service_pid"] else " (未运行)") \
         if diag["service_loaded"] else "❌ 未加载"
-    cap = {True: "✅ 可用", False: "❌ 不可用（无屏幕录制权限）", None: "? 未测"}[diag["screen_capture_ok"]]
     print(f"服务 ai.kimi.cu.service: {svc}")
-    print(f"宿主屏幕录制权限: {cap}")
+    # 关键：权限主体是 ai.kimi.cu（KimiCU.app），不是本脚本的宿主进程。
+    # 故以「kimi-cu 自己能不能截图」为真判据；宿主 screencapture 仅作参考。
+    kimi = {True: "✅ 可用", False: "❌ 不可用（截图被拦）",
+            None: "? 无法判定（探针 app 无窗口）"}[diag["kimi_screenshot_ok"]]
+    host = {True: "✅ 可用", False: "❌ 不可用", None: "? 未测"}[diag["host_screen_capture_ok"]]
+    print(f"kimi-cu 截图权限（ai.kimi.cu，真判据）: {kimi}"
+          + (f"  探针 app={diag.get('probe_app')}" if diag.get("probe_app") else ""))
+    print(f"本脚本宿主截图权限（node，仅参考）: {host}  ← 与 kimi-cu 无关，不得代替上行")
     if not diag["service_loaded"]:
         print("\n→ 修复：launchctl bootstrap gui/$(id -u) "
               "~/Library/LaunchAgents/ai.kimi.cu.service.plist")
         print("  该服务是 MachServices(XPC)，MCP 进程在但服务未加载时调用必失败。")
-    if diag["screen_capture_ok"] is False:
-        print("\n→ 宿主机未授予屏幕录制权限（系统 screencapture 亦失败）。")
+    if diag["kimi_screenshot_ok"] is False:
+        print("\n→ KimiCU.app 未获屏幕录制权限（AX 能读、截图空 = 被拦）。")
         print("  这是 macOS TCC 权限，不是 kimi-cu 或本脚本的 bug。")
-        print("  需人工在「系统设置 → 隐私与安全性 → 屏幕录制」授权运行本脚本的宿主。")
+        print("  需人工在「系统设置 → 隐私与安全性 → 屏幕录制」授权 **KimiCU**")
+        print("  （bundle id `ai.kimi.cu`，不是本脚本的宿主进程）。")
         print("  → 实测中止，不得报 PASS。")
         return 4
 
