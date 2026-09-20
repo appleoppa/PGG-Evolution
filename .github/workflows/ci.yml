@@ -22,6 +22,54 @@ jobs:
         run: |
           python3 tests/test_self_evolve.py
 
+      - name: Run F1-F7 control unit tests
+        run: |
+          python3 tests/test_evolution_units.py
+
+      - name: Verify F1-F7 units refuse invalid input (真拦截，非状态字段)
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/evolution_units.py").resolve()
+          with tempfile.TemporaryDirectory() as home:
+              env = dict(os.environ, HOME=home)
+              def run(unit, action, payload):
+                  r = subprocess.run([sys.executable, str(script), "--unit", unit,
+                                      "--action", action, "--payload",
+                                      json.dumps(payload, ensure_ascii=False)],
+                                     capture_output=True, text=True, env=env)
+                  return r.returncode, json.loads(r.stdout)
+              # F3 拒绝伪总分（不同量纲不得相加）
+              rc, d = run("F3", "total_score", {})
+              assert d["status"] == "BLOCKED" and rc == 1, d
+              # F2 缺上限不得无限迭代
+              rc, d = run("F2", "plan", {"failure_class": "logic", "caps": {"n_max": 3}})
+              assert d["status"] == "NEEDS_SPEC", d
+              # F5 child completion ≠ parent receipt → WATCH
+              rc, d = run("F5", "correlation", {"correlation_id": "c", "events": [
+                  {"correlation_id": "c", "event": "dispatch"},
+                  {"correlation_id": "c", "event": "start"},
+                  {"correlation_id": "c", "event": "completion"}]})
+              assert d["verdict"] == "WATCH" and d["complete"] is False, d
+              # F1 自证无效
+              hg = {"identity_ok": True, "scope_ok": True, "permission_ok": True,
+                    "data_policy_ok": True, "security_ok": True, "rollback_ready": True}
+              run("F1", "create_gap", {"gap_id": "G1", "expected": "a", "actual": "b",
+                                        "reproduction": "r", "severity": "s"})
+              run("F1", "propose", {"change_id": "C1", "gap_id": "G1", "diff_or_ref": "d",
+                                     "test_plan": "t", "rollback": "r", "owner": "alice",
+                                     "risk": "R2", "legal_na_reason": "非法律", "hardgate": hg})
+              run("F1", "verify", {"change_id": "C1", "result": "pass"})
+              rc, d = run("F1", "verify", {"change_id": "C1", "result": "pass",
+                                            "authorized": True, "approver": "alice"})
+              assert d["status"] == "BLOCKED", d
+              # F7 阶段门不全 → NOT_READY（非默认通过）
+              rc, d = run("F7", "evaluate", {"stages": {"RS1": {"requirements": "r"}}})
+              assert d["verdict"] == "NOT_READY", d
+              print("F1-F7 行为验证通过（伪总分/无界/回执缺环/自证/门不全 全部被拦）")
+          PY
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'
@@ -69,6 +117,36 @@ jobs:
               rc, d = run("--evidence", "C4", "--level", "E8", "--artifact", str(empty))
               assert d["status"] == "BLOCKED", d
               print("evidence 账本行为验证通过（谎报/跳级/夸大/空文件全部被拦）")
+          PY
+
+      - name: Verify gate covers untracked files (修复 L3/L4 假阴性)
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, subprocess, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          spec = importlib.util.spec_from_file_location("se_gate_ci", script)
+          mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          with tempfile.TemporaryDirectory() as repo:
+              def g(*a):
+                  return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+              g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+              Path(repo, "t.txt").write_text("x\n", encoding="utf-8")
+              g("add", "-A"); g("commit", "-qm", "i")
+              # 大未跟踪新文件 → L3 必须计入
+              Path(repo, "big.py").write_text("\n".join(f"v{i}={i}" for i in range(400)) + "\n", encoding="utf-8")
+              paths, diff = mod.gate_paths_from_git(Path(repo))
+              assert "big.py" in paths, paths
+              assert "v399=399" in diff, "未跟踪文件内容必须进 diff_text"
+              r = mod.apply_gate(paths, diff, backup_dir=repo)
+              assert r["checks"]["L3_diff_size"]["diff_lines"] >= 400, r["checks"]["L3_diff_size"]
+              # 未跟踪文件里的密钥 → L4 必须扫到（夹具运行时拼串，源码不留字面密钥）
+              fake = "sk-" + "live-" + "abcdefghijklmnopqrstuvwxyz" + "1234"
+              Path(repo, "leak.py").write_text(f'API_KEY = "{fake}"\n', encoding="utf-8")
+              p2, d2 = mod.gate_paths_from_git(Path(repo))
+              r2 = mod.apply_gate(p2, d2, backup_dir=repo)
+              assert r2["checks"]["L4_secret_scan"]["ok"] is False, r2["checks"]["L4_secret_scan"]
+              print("gate 未跟踪文件覆盖验证通过（L3 计行 / L4 扫密钥）")
           PY
 
       - name: Verify example curve script

@@ -25,7 +25,7 @@
 3. **诚实验证**（warmup/holdout 分离评测，只有 holdout 提升才算真进化）
 
 **能力边界（避免预期落差）**：
-- ✅ 提供：方法论、门禁、**证据等级账本**、评测方法、基因复用与淘汰、证据链格式
+- ✅ 提供：方法论、门禁、**证据等级账本**、**F1-F7 控制单元**、评测方法、基因复用与淘汰、证据链格式
 - ❌ 不提供：自主发现新目标、自主改写自身代码、无人工审批的自动发布
 - ⚠️ `Ancient` 等因子为**启发式分类命名**，默认 1.0 数值中性，不得用作评分来源（见 `docs/FORMULAS.md`）
 
@@ -51,6 +51,11 @@ python3 scripts/self_evolve.py --gate              # 无参=检查 git 工作区
 python3 scripts/self_evolve.py --evidence CLM-001 --level E2 \
     --artifact scripts/self_evolve.py --note apply_gate
 python3 scripts/self_evolve.py --evidence-status CLM-001   # 读回并派生允许的状态词
+
+# 7. F1-F7 控制单元：状态机 + 布尔硬门（详见 docs/UNITS.md）
+python3 scripts/evolution_units.py --list                 # 看七个单元
+python3 scripts/evolution_units.py --unit F3 --action total_score --payload '{}'
+# → BLOCKED（拒绝「总进化分」，不同量纲不得相加）
 ```
 
 ## 目录结构
@@ -64,6 +69,7 @@ PGG-Evolution/
 │   ├── LOOP.md          # 证据驱动受控闭环流程（Observe→...→Record）
 │   ├── GATES.md         # 五层门禁 + 三重进化门禁
 │   ├── EVIDENCE.md      # 证据等级账本 E0-E9（可执行的诚实性内核）
+│   ├── UNITS.md         # F1-F7 控制单元（状态机 + 布尔硬门）
 │   └── USAGE.md         # 详细使用说明
 ├── scripts/
 │   └── self_evolve.py   # 自进化引擎（可执行，通用，不绑定宿主）
