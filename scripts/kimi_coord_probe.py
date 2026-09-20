@@ -43,6 +43,46 @@ def mcp(name: str, args: dict, timeout: int = 30) -> dict:
     return {"_raw": p.stdout[:400], "_err": p.stderr[:300]}
 
 
+def _bundle_for_window(win_name: str) -> str | None:
+    """按窗口进程名从 kimi-cu list_apps 里匹配 bundle_id。
+
+    修复：此前未指定 --bundle 时用 pid=0，必返回空图。
+    注意：窗口进程名（System Events）与 app 显示名可能不同语言
+    （如窗口名 "Terminal" vs app 名 "终端"），故先试本地化名映射。
+    """
+    try:
+        r = mcp("list_apps", {})
+        apps = json.loads(r["result"]["content"][0]["text"])["apps"]
+    except Exception:
+        return None
+
+    # ① 精确名
+    for a in apps:
+        if a.get("name") == win_name:
+            return a.get("bundle_id")
+    # ② 模糊名
+    for a in apps:
+        n = a.get("name", "")
+        if n and (n in win_name or win_name in n):
+            return a.get("bundle_id")
+    # ③ 进程名 → bundle id 映射（覆盖中英文差异：System Events 报英文，
+    #    kimi-cu 报本地化名，如 "TextEdit" vs "文本编辑"）
+    pname_map = {
+        "terminal": "com.apple.Terminal", "finder": "com.apple.finder",
+        "safari": "com.apple.Safari", "chrome": "com.google.Chrome",
+        "wechat": "com.tencent.xinWeChat", "feishu": "com.bytedance.macos.feishu",
+        "textedit": "com.apple.TextEdit",
+        "onedrive": "com.coderforart.One-Markdown",
+    }
+    low = win_name.lower().replace(" ", "")
+    for k, bid in pname_map.items():
+        if k in low:
+            for a in apps:
+                if a.get("bundle_id") == bid:
+                    return bid
+    return None
+
+
 def window_geometry(app_name: str | None = None) -> dict | None:
     """取窗口真实几何（逻辑点）。
 
@@ -82,13 +122,44 @@ def window_geometry(app_name: str | None = None) -> dict | None:
 
 
 def png_size(path: str) -> tuple[int, int] | None:
+    """取图像像素尺寸，支持 PNG 与 JPEG。
+
+    修复：kimi-cu 实测返回 **JPEG**（`file` 报 "JPEG image data ... 1324x768"），
+    而旧版只认 PNG magic，导致拿到图后仍报「非合法 PNG」而中止。
+    """
     try:
-        d = open(path, "rb").read(24)
-        if d[:8] != b"\x89PNG\r\n\x1a\n":
-            return None
-        return struct.unpack(">II", d[16:24])
-    except OSError:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+            if head[:8] == b"\x89PNG\r\n\x1a\n":
+                return struct.unpack(">II", head[16:24])
+            if head[:2] == b"\xff\xd8":  # JPEG：扫 SOF 段拿尺寸
+                fh.seek(2)
+                while True:
+                    b = fh.read(1)
+                    if not b:
+                        return None
+                    if b != b"\xff":
+                        continue
+                    marker = fh.read(1)
+                    while marker == b"\xff":
+                        marker = fh.read(1)
+                    if marker in (b"\xd8", b"\xd9") or not marker:
+                        continue
+                    ln = fh.read(2)
+                    if len(ln) < 2:
+                        return None
+                    seglen = struct.unpack(">H", ln)[0]
+                    # SOF0-SOF15（排除 DHT/DAC/RST）
+                    if 0xC0 <= marker[0] <= 0xCF and marker[0] not in (0xC4, 0xC8, 0xCC):
+                        data = fh.read(5)
+                        if len(data) < 5:
+                            return None
+                        h, w = struct.unpack(">HH", data[1:5])
+                        return (w, h)
+                    fh.seek(seglen - 2, 1)
+    except (OSError, struct.error):
         return None
+    return None
 
 
 def diagnose_service() -> dict:
@@ -238,6 +309,7 @@ def main() -> int:
         print(f"✗ 取不到窗口几何（目标 {args.app or '任意可见进程'}）")
         print("  → 实测中止，不产出结论（不得凭猜测报 PASS）")
         return 2
+
     print(f"目标进程: {geo['name']}")
     print(f"窗口真实几何(逻辑点): 位置({geo['x']},{geo['y']}) 尺寸({geo['w']}x{geo['h']})")
     print(f"窗口中心逻辑坐标: {geo['center_logical']}")
@@ -246,8 +318,13 @@ def main() -> int:
         print("\n[dry-run] 将执行：get_app_state(image) → 比对截图尺寸 → 算缩放比")
         return 0
 
-    r = mcp("get_app_state", {"app": args.bundle, "mode": "image"}) if args.bundle else \
-        mcp("get_app_state", {"pid": 0, "mode": "image"})
+    # 自动解析目标 bundle id：优先 --bundle，否则按窗口名从 kimi-cu list_apps 里匹配。
+    # 修复：此前未指定 --bundle 时硬编码 pid=0（无效），必返回空图。
+    bundle = args.bundle or _bundle_for_window(geo["name"])
+    if bundle:
+        print(f"目标 bundle: {bundle}")
+    r = mcp("get_app_state", {"app": bundle, "mode": "image"}) if bundle else \
+        mcp("get_app_state", {"app": geo["name"], "mode": "image"})
     if r.get("result", {}).get("isError"):
         msg = r["result"]["content"][0].get("text", "")
         print(f"\n✗ kimi-cu 不可用: {msg}")
@@ -266,7 +343,7 @@ def main() -> int:
 
     size = png_size(args.shot)
     if not size:
-        print("✗ 截图非合法 PNG")
+        print("✗ 截图尺寸解析失败（非 PNG/JPEG）")
         return 3
     sw, sh = size
     sx, sy = sw / geo["w"], sh / geo["h"]
@@ -278,7 +355,8 @@ def main() -> int:
         print("⚠️ 横纵缩放比不一致 → 可能存在非等比拉伸，点击会偏")
         return 1
     print(f"\n结论：截图相对逻辑窗口为 {sx:.2f}x 等比缩放。")
-    print("  下一步（人工/后续脚本）：取截图中心像素点做 click，再读回该点元素，")
+
+    print("  下一步：取截图中心像素点做 click，再读回该点元素，")
     print("  比对是否命中窗口中心元素——只有这一步通过才能说『坐标校正实测有效』。")
     print("  仅凭『缩放比等比』**不足以**证明点击准确。")
     return 0
