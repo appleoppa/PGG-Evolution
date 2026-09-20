@@ -629,13 +629,26 @@ def test_service_repair_diagnoses_plist_kinds_safely() -> None:
         }))
         assert diag() == "ok", "未识别 ok（绝对路径）"
 
-        # dry-run 在临时 HOME 下跑：必须非零（需修复）且不写任何文件
+        # dry-run 在临时 HOME 下跑：**核心不变量=不写任何文件**。
+        # 退出码按真实环境分三支（均合法，不得硬编码单一期望）：
+        #   3 = 无 KimiCU.app（CI ubuntu）→ 必须给安装指引
+        #   1 = 需修复但 dry-run   → 必须标 [dry-run]
+        #   0 = 本机服务已加载且 plist 为绝对路径 → 无需修复
+        # 2026-09-20 CI 实测：旧断言只认 [dry-run]，在 CI（无 app）与本机（服务在）均误报。
         before = sorted(p.name for p in la.iterdir())
         r = subprocess.run([sys.executable, str(script)], capture_output=True,
                            text=True, timeout=60, env=env)
         after = sorted(p.name for p in la.iterdir())
         assert before == after, f"dry-run 不得改动文件系统: {before} → {after}"
-        assert "[dry-run]" in r.stdout or r.returncode == 0, r.stdout[:300]
+        assert r.returncode in (0, 1, 3), f"退出码越界: rc={r.returncode}\n{r.stdout[:300]}"
+        if r.returncode == 3:
+            assert "KimiCU" in r.stdout and "安装" in r.stdout, r.stdout[:300]
+        elif r.returncode == 1:
+            assert "[dry-run]" in r.stdout, r.stdout[:300]
+        else:
+            assert "无需修复" in r.stdout, r.stdout[:300]
+        # 任何分支都不得在 dry-run 下落盘写 plist
+        assert not plist_path.exists() or plist_path.read_bytes() != b"", r.stdout[:200]
     print("✓ 服务修复：识别 missing/relative/ok 三类，默认 dry-run 不改系统")
 
 
