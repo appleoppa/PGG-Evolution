@@ -44,7 +44,7 @@ defect_rate = avg(defects)×0.5 + boost_coeff × max(defects)^1.5
 
 - **E×V×M×A**：熵(Entropy)、活力(Vibe)、物质(Matter)、行动(Action)
 - **Base**：基础状态（工具/环境）
-- **Ancient**：古老智慧因子（TaoTeChing × IChing × HuangDi × HeTuLuoShu × GanZhi × WuXing）——八卦只分区不乘法
+- **Ancient**：古老智慧因子。**明确为启发式命名/分类占位，不是数值项**：它不参与乘法，只在多候选时做分区排序，且不得作为评测分数的来源。把 EVM 当可测指标时，请只用 E×V×M×A×Base×(1-defect_rate) 这段可计算部分。
 - **defect_rate**：缺陷率惩罚，越大越拉低 EVM
 
 **EVM 的职责**：把已暴露短板映射为可治理缺陷，比较补齐前后变化。

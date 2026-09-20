@@ -53,3 +53,63 @@ jobs:
       - name: Verify prune (Φ, sandbox-isolated)
         run: |
           python3 scripts/self_evolve.py --prune-genes | grep '"status": "OK"'
+
+      - name: Verify five-layer apply gate blocks (真门禁行为，非状态字段)
+        run: |
+          # 越界路径必须被 L2 拦截；退出码非 0 才算真刹车
+          if python3 scripts/self_evolve.py --gate /etc/passwd --gate-backup .github 2>/dev/null; then
+            echo "门禁未拦截越界路径（假阳性）"; exit 1
+          fi
+          python3 scripts/self_evolve.py --gate scripts/self_evolve.py --gate-backup .github \
+            | grep -E '"L2_allowlist"' > /dev/null
+          echo "gate 行为验证通过"
+
+      - name: Verify prune effect is non-zero (淘汰必须真生效)
+        run: |
+          # 造一个无 id 的规则基因 + 两次 failure，淘汰后 match 必须归零
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          with tempfile.TemporaryDirectory() as home:
+              d = Path(home) / ".pi" / "agent" / "evolution" / "genes"
+              d.mkdir(parents=True)
+              (d / "genes-rule-ci.json").write_text(json.dumps({"genes": [{
+                  "type": "rule", "source": "gaps", "module": "K",
+                  "mechanism": "CI 规则基因无 id 字段，验证淘汰真生效", "resolution": "x"}]}), encoding="utf-8")
+              env = dict(os.environ, HOME=home)
+              def run(*a):
+                  r = subprocess.run([sys.executable, str(script), *a], capture_output=True, text=True, env=env)
+                  return json.loads(r.stdout)
+              gid = run("--match", "淘汰真生效")["genes"][0]["id"]
+              assert gid.startswith("derived-"), gid
+              run("--feedback", "淘汰真生效", "failure", gid)
+              run("--feedback", "淘汰真生效", "failure", gid)
+              dry = run("--prune-genes", "--dry-run")
+              assert gid in dry["would_deprecate"], dry
+              assert dry["effect"]["affected_in_bank"] == 1, dry["effect"]
+              run("--prune-genes")
+              after = run("--match", "淘汰真生效")
+              assert after["matched"] == 0, f"淘汰后应归零: {after}"
+              print("prune 真淘汰验证通过（affected_in_bank=1, matched_after=0）")
+          PY
+
+      - name: Verify eval pairs hit with total (不得跨 run 拼分子分母)
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          with tempfile.TemporaryDirectory() as home:
+              d = Path(home) / ".pi" / "agent" / "evolution" / "loop-ci" / "runs"
+              d.mkdir(parents=True)
+              (d / "a.json").write_text(json.dumps({"eval_set": "holdout", "summary": {"overall": {"hit": 2, "total": 5, "rate": 0.4}}}), encoding="utf-8")
+              (d / "b.json").write_text(json.dumps({"eval_set": "holdout", "summary": {"overall": {"hit": 3, "total": 30, "rate": 0.1}}}), encoding="utf-8")
+              env = dict(os.environ, HOME=home)
+              out = json.loads(subprocess.run([sys.executable, str(script), "--eval", "ci"], capture_output=True, text=True, env=env).stdout)
+              s = out["summary"]["holdout:overall"]
+              assert s["latest"]["hit"] == 3 and s["latest"]["total"] == 30, s
+              assert s["latest"]["rate"] == 0.1, f"latest 必须同源 0.1（旧实现报 0.4）: {s}"
+              assert s["best"]["rate"] == 0.4, s
+              print("eval 同源配对验证通过（latest=3/30=0.1, best=0.4）")
+          PY

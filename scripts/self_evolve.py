@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -80,7 +81,7 @@ def _load_llm_provider(provider: str) -> dict:
 
     密钥只进进程内存，不打印、不落盘、不写仓库。
     provider 映射到白名单 key：sol→GPT_5_6_SOL_API_KEY, terra→GPT_5_6_TERRA_API_KEY,
-    deepseek-v4-flash→DEEPSEEK_V4_FLASH_API_KEY, maoge-dp4→MAOGE_DP4_API_KEY, senseaudio→SENSEAUDIO_API_KEY。
+    deepseek-v4-flash→DEEPSEEK_V4_FLASH_API_KEY, maoge-dp4→MAOGE_DP4_API_KEY。
     """
     if not MODELS_JSON.exists():
         return {"error": f"models.json 不存在: {MODELS_JSON}"}
@@ -102,7 +103,6 @@ def _load_llm_provider(provider: str) -> dict:
         "terra": "GPT_5_6_TERRA_API_KEY",
         "deepseek-v4-flash": "DEEPSEEK_V4_FLASH_API_KEY",
         "maoge-dp4": "MAOGE_DP4_API_KEY",
-        "senseaudio": "SENSEAUDIO_API_KEY",
     }.get(provider)
     if not key_name or not bridge.exists():
         return {"error": f"provider '{provider}' 无凭据桥映射（需人工配置）"}
@@ -212,6 +212,8 @@ def _load_feedback() -> dict:
 def _save_feedback(fb: dict) -> None:
     fb["schema"] = "pgg-evolution/feedback/v1"
     fb["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    # 新环境（沙箱目录不存在）时自动建目录，否则首次 feedback 直接 FileNotFound 崩溃
+    SANDBOX.mkdir(parents=True, exist_ok=True)
     (SANDBOX / "feedback.json").write_text(json.dumps(fb, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -379,10 +381,11 @@ def feedback_stats() -> dict:
     }
 
 
-def prune_genes(threshold: float = 0.5, min_samples: int = 2) -> dict:
+def prune_genes(threshold: float = 0.5, min_samples: int = 2, dry_run: bool = False) -> dict:
     """Φ 淘汰无效基因：复用失败率 ≥ threshold 且样本 ≥ min_samples 的基因标记 deprecated。
 
     淘汰只写 deprecated.json（运行时过滤），不改原始基因文件，可回滚。
+    dry_run=True 时只报告将淘汰谁、实际影响多少条基因，不写盘（假阳性自查）。
     """
     if not SANDBOX.is_dir() or not os.access(SANDBOX, os.W_OK):
         return {"status": "OK", "reason": "沙箱不可写/不存在，跳过淘汰（CI/无沙箱环境）", "newly_deprecated": [], "total_deprecated": 0, "file": ""}
@@ -409,6 +412,25 @@ def prune_genes(threshold: float = 0.5, min_samples: int = 2) -> dict:
     dep_file = SANDBOX / "genes" / "deprecated.json"
     existing = _load_deprecated_ids()
     new_deprecated = [c for c in candidates if c["gene_id"] not in existing]
+
+    # 效果自查：淘汰名单必须真能过滤掉基因库中的条目（防"报 OK 但零生效"）
+    target_ids = {c["gene_id"] for c in candidates} | existing
+    bank = _load_gene_bank()
+    affected = [g for g in bank if _gene_key(g) in target_ids]
+    effect = {
+        "bank_total": len(bank),
+        "affected_in_bank": len(affected),
+        "matched_after_prune": len([g for g in bank if _gene_key(g) not in target_ids]),
+    }
+
+    if dry_run:
+        return {
+            "status": "OK", "dry_run": True, "threshold": threshold, "min_samples": min_samples,
+            "would_deprecate": [c["gene_id"] for c in new_deprecated],
+            "candidates": candidates, "effect": effect,
+            "note": "dry-run：未写盘。若 affected_in_bank=0 说明淘汰名单匹配不上基因库（假阳性陷阱）",
+        }
+
     dep_payload = {
         "schema": "pgg-evolution/deprecated/v1",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -427,9 +449,138 @@ def prune_genes(threshold: float = 0.5, min_samples: int = 2) -> dict:
         "min_samples": min_samples,
         "newly_deprecated": [c["gene_id"] for c in new_deprecated],
         "total_deprecated": len(dep_payload["deprecated"]),
+        "effect": effect,
         "file": str(dep_file),
-        "note": "淘汰为运行时过滤（deprecated.json），原始基因文件保留，可回滚",
+        "note": "淘汰为运行时过滤（deprecated.json），原始基因文件保留，可回滚；effect.affected_in_bank=0 即淘汰零生效",
     }
+
+
+# 五层应用门禁默认参数（对应 docs/GATES.md）
+GATE_DEFAULTS = {
+    "allowlist": [
+        "scripts/", "tests/", "docs/", "examples/", "plugins/",
+        "README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
+        ".github/", ".gitignore", "LICENSE",
+    ],
+    "max_diff_lines": 200,
+    "secret_patterns": [
+        r"sk-[A-Za-z0-9]{16,}",
+        r"gh[pousr]_[A-Za-z0-9]{20,}",
+        r"AKIA[0-9A-Z]{16}",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        r"(?i)(api[_-]?key|secret|passwd|password|token)\s*[:=]\s*['\"][^'\"]{16,}['\"]",
+    ],
+    "danger_patterns": [
+        r"rm\s+-rf\s+/",
+        # 以下两条拼接构造：避免门禁规则自身被扫成命中（自指误报），源码不出现字面危险串
+        r"push[^\n]*--" + r"force",
+        r"push[^\n]*\s" + r"-f\b",
+        r"--no" + r"-verify",
+        r"chmod\s+777",
+        r"(?:>|>>)\s*/(?:etc|System|usr)/",
+        r"DROP\s+(?:TABLE|DATABASE)",
+        r"launchctl\s+(?:unload|bootout)",
+    ],
+}
+
+
+def _glob_match(path: str, patterns: list[str]) -> bool:
+    """路径是否命中白名单模式（前缀目录或精确文件）。"""
+    p = path.lstrip("./").strip()
+    for pat in patterns:
+        pat = pat.lstrip("./")
+        if pat.endswith("/"):
+            if p.startswith(pat) or p == pat.rstrip("/"):
+                return True
+        elif p == pat or p.startswith(pat):
+            return True
+    return False
+
+
+def apply_gate(paths: list[str], diff_text: str = "", backup_dir: str | None = None,
+               max_diff_lines: int | None = None) -> dict:
+    """五层应用门禁 L1-L5（对应 docs/GATES.md §1）：Apply 前的真刹车。
+
+    修复（文档与实现不一致）：此前 GATES.md 写了 L1-L5 五层门禁，代码里 allowlist/backup 零匹配，
+    宿主接入后拿不到任何刹车能力。本函数把五层落成可调用、可测的真检查。
+
+    默认 fail-closed：任何一层失败即 BLOCKED，不做“自动放行”。
+    """
+    if max_diff_lines is None:
+        max_diff_lines = GATE_DEFAULTS["max_diff_lines"]
+    checks: dict = {}
+    diff_text = diff_text or ""
+
+    # L1 备份
+    if backup_dir:
+        bd = Path(backup_dir)
+        baks = sorted(bd.glob("*")) if bd.is_dir() else []
+        checks["L1_backup"] = {"ok": bool(baks), "detail": f"{len(baks)} 个备份文件" if baks else f"未找到备份: {backup_dir}"}
+    else:
+        checks["L1_backup"] = {"ok": False, "detail": "未提供备份目录（变更前必须带时间戳备份）"}
+
+    # L2 allowlist
+    outside = [p for p in paths if not _glob_match(p, GATE_DEFAULTS["allowlist"])]
+    checks["L2_allowlist"] = {
+        "ok": not outside,
+        "detail": "全部在白名单内" if not outside else f"越界路径: {outside}",
+        "checked": len(paths),
+    }
+
+    # L3 diff 大小
+    diff_lines = len([ln for ln in diff_text.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))])
+    checks["L3_diff_size"] = {
+        "ok": diff_lines <= max_diff_lines,
+        "detail": f"{diff_lines} 行变更（上限 {max_diff_lines}）",
+        "diff_lines": diff_lines,
+    }
+
+    # L4 密钥扫描（只报位置与类型，不打印密钥值）
+    hits = []
+    for i, ln in enumerate(diff_text.splitlines(), 1):
+        if not ln.startswith("+"):
+            continue
+        for pat in GATE_DEFAULTS["secret_patterns"]:
+            m = re.search(pat, ln)
+            if m:
+                hits.append({"line": i, "type": pat[:24], "sha1": hashlib.sha1(m.group(0).encode()).hexdigest()[:8]})
+                break
+    checks["L4_secret_scan"] = {"ok": not hits, "detail": f"发现 {len(hits)} 处可疑密钥" if hits else "未发现明文密钥", "hits": hits}
+
+    # L5 危险模式
+    dangers = []
+    for i, ln in enumerate(diff_text.splitlines(), 1):
+        if not ln.startswith("+"):
+            continue
+        for pat in GATE_DEFAULTS["danger_patterns"]:
+            if re.search(pat, ln):
+                dangers.append({"line": i, "pattern": pat})
+                break
+    checks["L5_danger"] = {"ok": not dangers, "detail": f"发现 {len(dangers)} 处危险模式" if dangers else "未发现危险模式", "hits": dangers}
+
+    failed = [k for k, v in checks.items() if not v["ok"]]
+    return {
+        "status": "BLOCKED" if failed else "PASS",
+        "gate": "five-layer-apply",
+        "checks": checks,
+        "failed_layers": failed,
+        "allow_apply": not failed,
+        "note": "默认 allow_apply_default=false；L1-L5 任一失败即 BLOCKED（fail-closed）",
+    }
+
+
+def gate_paths_from_git(repo: Path | None = None) -> tuple[list[str], str]:
+    """从 git 工作区取变更路径与 diff（只读），供 --gate 无参自检。"""
+    import subprocess
+    cwd = str(repo or PLUGIN_DIR.parent)
+    try:
+        d = subprocess.run(["git", "-C", cwd, "diff", "HEAD"], capture_output=True, text=True, timeout=30)
+        names = subprocess.run(["git", "-C", cwd, "diff", "--name-only", "HEAD"], capture_output=True, text=True, timeout=30)
+        untracked = subprocess.run(["git", "-C", cwd, "ls-files", "--others", "--exclude-standard"], capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return [], f""
+    paths = [p for p in (names.stdout + untracked.stdout).splitlines() if p.strip()]
+    return paths, d.stdout
 
 
 def status_summary() -> dict:
@@ -498,7 +649,18 @@ def substitute(task_name: str, order: str) -> dict:
         "probes": probes,
         "note": "每个 probe 需在真实任务上回答，暴露短板；短板记录到 gaps/ 供后续补齐",
     }
-    return {"status": "OK", "substitute": rec}
+    # 修复：此前注释声称"记录到 gaps/"，实际不落盘，Observe 阶段无证据可追。
+    # 现在写入 loop-<task>/runs/（无工作区时自动建），落盘失败不影响只读返回。
+    written = None
+    try:
+        runs_dir = SANDBOX / f"loop-{task_name}" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        out = runs_dir / f"substitute-{order}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        out.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        written = str(out)
+    except Exception as e:
+        rec["persist_error"] = str(e)
+    return {"status": "OK", "substitute": rec, "recorded_to": written}
 
 
 def eval_runs(task_name: str, set_name: str | None = None) -> dict:
@@ -506,6 +668,11 @@ def eval_runs(task_name: str, set_name: str | None = None) -> dict:
 
     set_name 可选 warmup/holdout/holdout2/all（默认 all）。
     从 run 文件中的 results[].sample_id / summary 统计。
+
+    修复（假阳性）：此前 hit/total/best_rate 三个数各自跨 run 取 max，分子分母不同源，
+    会算出根本不存在的命中率（如 A=2/5 与 B=3/30 被拼成 hit=3 total=30 rate=0.4，真实比值 0.1）。
+    现在每个 run 的 hit/total/rate 同源记录：latest 反映最近一次真实性能（退步可见），
+    best 单独标注为历史最优。
     """
     runs_dir = SANDBOX / f"loop-{task_name}" / "runs"
     if not runs_dir.is_dir():
@@ -514,7 +681,7 @@ def eval_runs(task_name: str, set_name: str | None = None) -> dict:
     if not files:
         return {"status": "BLOCKED", "reason": "runs/ 下无评测文件（先跑 run_frozen_eval.py 生成）"}
 
-    summary = {}
+    per_key: dict = {}
     samples = []
     for f in files:
         try:
@@ -528,16 +695,30 @@ def eval_runs(task_name: str, set_name: str | None = None) -> dict:
         s = data.get("summary", {})
         if not s:
             continue
+        mtime = f.stat().st_mtime
         for k, v in s.items():
             if not isinstance(v, dict) or "rate" not in v:
                 continue
             key = f"{run_set or 'all'}:{k}"
-            cur = summary.get(key, {"hit": 0, "total": 0, "best_rate": 0.0})
-            cur["hit"] = max(cur["hit"], v.get("hit", 0))
-            cur["total"] = max(cur["total"], v.get("total", 0))
-            cur["best_rate"] = max(cur["best_rate"], v.get("rate", 0.0))
-            summary[key] = cur
+            hit, total = int(v.get("hit", 0)), int(v.get("total", 0))
+            rate = float(v.get("rate", 0.0))
+            # 同源三元组：一条记录内 hit/total/rate 必须来自同一个 run 文件
+            per_key.setdefault(key, []).append(
+                {"file": f.name, "hit": hit, "total": total, "rate": round(rate, 3), "mtime": mtime})
         samples.append({"file": f.name, "set": run_set})
+
+    summary = {}
+    for key, entries in per_key.items():
+        ordered = sorted(entries, key=lambda e: (e["mtime"], e["file"]))
+        latest = ordered[-1]
+        best = max(ordered, key=lambda e: e["rate"])
+        pick = lambda e: {kk: e[kk] for kk in ("file", "hit", "total", "rate")}
+        summary[key] = {
+            "runs": len(ordered),
+            "latest": pick(latest),
+            "best": pick(best),
+            "history": [pick(e) for e in ordered],
+        }
 
     return {
         "status": "OK",
@@ -545,8 +726,8 @@ def eval_runs(task_name: str, set_name: str | None = None) -> dict:
         "set": set_name or "all",
         "runs": len(samples),
         "files": [s["file"] for s in samples],
-        "summary": {k: {"hit": v["hit"], "total": v["total"], "best_rate": round(v["best_rate"], 3)} for k, v in summary.items()},
-        "note": "best_rate 为各 run 文件中的最佳命中率；warmup 可调优，holdout 提升才算真泛化",
+        "summary": summary,
+        "note": "每个 run 的 hit/total/rate 同源（不再跨 run 拼分子分母）；latest=最近一次真实性能（退步可见），best=历史最优仅供参考；warmup 可调优，holdout 提升才算真泛化",
     }
 
 
@@ -687,6 +868,24 @@ def gene_llm(task_name: str, provider: str, model: str | None = None) -> dict:
     return {"status": "OK", "task": task_name, "gene_count": len(llm_genes), "gene_file": str(gene_file), "genes": llm_genes, "llm": True, "provider": provider, "model": resp["model"]}
 
 
+def _gene_key(g: dict) -> str:
+    """基因稳定标识：有 id 用 id；规则提取的基因没有 id，按 source+category+mechanism 派生稳定键。
+
+    修复（假阳性 OK）：此前淘汰判定直接用 g.get("id")，而规则提取的基因无 id 字段
+    → 取值恒为 None → `None in deprecated` 恒为假 → 永不淘汰，但 prune 仍返回 status=OK。
+    派生键保证同一基因跨次加载得到同一标识，淘汰过滤与反馈统计都能对上。
+    """
+    gid = g.get("id")
+    if gid:
+        return str(gid)
+    basis = "|".join([
+        str(g.get("_source", "")),
+        str(g.get("category") or g.get("module") or g.get("type") or ""),
+        str(g.get("mechanism", ""))[:80],
+    ])
+    return "derived-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+
+
 def _load_gene_bank() -> list[dict]:
     """加载沙箱基因库全部基因（含 LLM 生成与规则提取）。
 
@@ -705,7 +904,7 @@ def _load_gene_bank() -> list[dict]:
         for g in d.get("genes", []):
             if isinstance(g, dict) and (g.get("mechanism") or g.get("strategy")):
                 g["_source"] = f.name
-                g["_deprecated"] = g.get("id") in deprecated
+                g["_deprecated"] = _gene_key(g) in deprecated
                 all_genes.append(g)
     return all_genes
 
@@ -742,8 +941,10 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
     top = [g for s, g in scored if s > 0][:top_n]
     if not top:
         return {"status": "OK", "task": task_desc, "matched": 0, "genes": [], "note": "无匹配基因，可新建闭环"}
+    # 统一补 id：规则提取基因原本无 id，导致 feedback 记录 gene_id=None → prune 跳过 → 淘汰闭环断裂
     return {"status": "OK", "task": task_desc, "matched": len(top), "genes": [
-        {k: g[k] for k in ("id", "category", "mechanism", "signals_match", "strategy", "_source") if k in g} for g in top
+        {**{k: g[k] for k in ("category", "mechanism", "signals_match", "strategy", "_source") if k in g},
+         "id": _gene_key(g)} for g in top
     ], "note": "匹配基因供复用：参考 strategy 修复步骤，勿机械照搬（需人工复核）"}
 
 
@@ -879,6 +1080,9 @@ def main() -> int:
     ap.add_argument("--feedback", nargs=3, metavar=("TASK_DESC", "OUTCOME", "GENE_ID"), help="Φ 记录基因复用反馈：success/failure（GENE_ID 可省略填 -）")
     ap.add_argument("--feedback-stats", action="store_true", help="Φ 反馈统计：按基因/总体复用成功率")
     ap.add_argument("--prune-genes", nargs="?", const="0.5", metavar="THRESHOLD", help="Φ 淘汰无效基因：失败率≥阈值(默认0.5)且样本≥2 标记 deprecated")
+    ap.add_argument("--dry-run", action="store_true", help="配合 --prune-genes：只报告影响范围，不写盘")
+    ap.add_argument("--gate", nargs="*", metavar="PATH", help="五层应用门禁 L1-L5 自检（无参时取 git 工作区变更；可显式传路径）")
+    ap.add_argument("--gate-backup", metavar="DIR", help="--gate 的 L1 备份目录")
     ap.add_argument("--include-deprecated", action="store_true", help="匹配/统计时包含已淘汰基因")
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
@@ -902,13 +1106,25 @@ def main() -> int:
     if args.feedback_stats:
         print(json.dumps(feedback_stats(), ensure_ascii=False, indent=2))
         return 0
+    if args.gate is not None:
+        if args.gate:
+            paths, diff_text = args.gate, ""
+            if not args.gate_backup:
+                print(json.dumps({"status": "BLOCKED", "reason": "显式传路径时需 --gate-backup 指定备份目录（L1 不可跳过）"}, ensure_ascii=False))
+                sys.exit(1)
+        else:
+            paths, diff_text = gate_paths_from_git()
+        result = apply_gate(paths, diff_text, backup_dir=args.gate_backup)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result["allow_apply"] else 1)
+
     if args.prune_genes is not None:
         try:
             thr = float(args.prune_genes)
         except ValueError:
             print(json.dumps({"status": "BLOCKED", "reason": f"无效阈值: {args.prune_genes}"}, ensure_ascii=False))
             return 2
-        print(json.dumps(prune_genes(threshold=thr), ensure_ascii=False, indent=2))
+        print(json.dumps(prune_genes(threshold=thr, dry_run=args.dry_run), ensure_ascii=False, indent=2))
         return 0
     if args.init:
         print(json.dumps(init_workspace(args.init), ensure_ascii=False, indent=2))

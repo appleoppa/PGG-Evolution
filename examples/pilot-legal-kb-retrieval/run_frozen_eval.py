@@ -7,7 +7,7 @@
   python3 run_frozen_eval.py --verbose     # 显示每条结果
 
 调用本地法律知识库 CLI：legal-kb-search / legal-kb-article-search（路径可用环境变量 LEGAL_KB_CLI_DIR 覆盖，默认按 PATH 查找）
-评测集：evidence/frozen-eval-set-001.json
+评测集：frozen-eval-set-001.json（与本脚本同目录）
 输出：runs/frozen-eval-<timestamp>.json
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-EVAL_SET = HERE / "evidence" / "frozen-eval-set-001.json"
+EVAL_SET = HERE / "frozen-eval-set-001.json"
 
 
 def _find_cli(name: str) -> str:
@@ -132,8 +132,8 @@ def main() -> int:
                     help="warmup=冻结集(可调优) holdout=分离集(禁看) all=两者")
     args = ap.parse_args()
 
-    HOLD_SET = HERE / "evidence" / "holdout-set-001.json"
-    HOLD_SET2 = HERE / "evidence" / "holdout-set-002.json"
+    HOLD_SET = HERE / "holdout-set-001.json"
+    HOLD_SET2 = HERE / "holdout-set-002.json"
     if args.set in ("warmup", "all"):
         data = json.loads(EVAL_SET.read_text(encoding="utf-8"))
         samples = [s for s in data["samples"] if args.task == "all" or s["task"] == args.task]
@@ -176,6 +176,7 @@ def main() -> int:
         "results": results,
     }
     out = HERE / "runs" / f"frozen-eval-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)  # 开箱即跑：runs/ 不存在时自动建（原先直接 write 报 FileNotFound）
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"→ {out}")

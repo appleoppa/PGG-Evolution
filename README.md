@@ -1,12 +1,14 @@
-# PGG-Evolution 自进化方案
+# PGG-Evolution 智能体进化治理框架
 
-> 一个可复用的「智能体自进化」工程方案：把 APEX 公式体系、开智进化循环、EVM 治理
+> 一个可复用的「智能体排障与进化治理」工程方案：把 APEX 公式体系、开智进化循环、EVM 治理
 > 整理为可执行的证据驱动受控闭环。**不是玄学公式，是让每次排障变成可复现资产的方法论。**
 
-![version](https://img.shields.io/badge/version-0.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![CI](https://github.com/appleoppa/PGG-Evolution/actions/workflows/ci.yml/badge.svg)
+![version](https://img.shields.io/badge/version-0.3.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![CI](https://github.com/appleoppa/PGG-Evolution/actions/workflows/ci.yml/badge.svg)
 
-> **English**: A reusable self-evolution framework for AI agents — APEX formulas + evidence-driven
-> closed loop + holdout evaluation. Works with any agent (Pi/Codex/Claude/DeepSeek...).
+> **English**: An evidence-driven evolution *governance* framework for AI agents — APEX formulas
+> + observe/diagnose/apply loop + holdout evaluation + five-layer apply gate.
+> Works with any agent (Pi/Codex/Claude/DeepSeek...). It is a gated semi-automatic loop,
+> **not** an autonomous self-evolving engine.
 
 ---
 
@@ -14,12 +16,18 @@
 
 - **5-6 月**的「自我进化」研究（APEX 公式 + 开智循环 + EVM 治理 + GitHub 进化工厂）
 - **2026-09** 首次真实闭环验证（本地法条检索从瘫痪救活到真实泛化 100%）
-- 整理成一套 **任何人/任何 agent 都能用的自进化方案**：公式、方法、工具、证据
+- 整理成一套 **任何人/任何 agent 都能用的进化治理方案**：公式、方法、工具、证据
 
-**核心定位**：它是"带门禁的半自动闭环"，不是"自主进化"。它让 AI 能：
+**核心定位（请以此为准）**：它是「**带门禁的半自动排障 SOP 脚手架 + 进化治理框架**」，
+**不是**「自进化 AI 引擎」。它让 AI 能：
 1. **自己发现问题**（Observe→Diagnose，真实工具故障会被发现）
 2. **有依据地改进**（Propose→Gate→Apply，人工审批 + 可回滚）
 3. **诚实验证**（warmup/holdout 分离评测，只有 holdout 提升才算真进化）
+
+**能力边界（避免预期落差）**：
+- ✅ 提供：方法论、门禁、评测方法、基因复用与淘汰、证据链格式
+- ❌ 不提供：自主发现新目标、自主改写自身代码、无人工审批的自动发布
+- ⚠️ `Ancient` 等因子为**启发式分类命名**，不参与数值计算，不得用作评分来源（见 `docs/FORMULAS.md`）
 
 ## 快速开始
 
@@ -30,11 +38,14 @@ python3 scripts/self_evolve.py --health
 # 2. 初始化一个进化循环工作区
 python3 scripts/self_evolve.py --init <task_name>
 
-# 3. 三顺序代入找短板（核心方法）
+# 3. 三顺序代入找短板（核心方法，结果自动落盘 runs/）
 python3 scripts/self_evolve.py --substitute <task_name> --order 21354
 
-# 4. 跑兼容性测试
+# 4. 跑测试（含行为正确性断言，不只是"不崩溃"）
 python3 tests/test_self_evolve.py
+
+# 5. 变更前跑五层应用门禁（L1 备份 / L2 白名单 / L3 diff 大小 / L4 密钥 / L5 危险模式）
+python3 scripts/self_evolve.py --gate              # 无参=检查 git 工作区变更
 ```
 
 ## 目录结构

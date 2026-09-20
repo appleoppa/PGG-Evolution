@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -22,6 +23,32 @@ def run(args: list[str]) -> dict:
         return json.loads(r.stdout)
     except json.JSONDecodeError:
         return {"status": "PARSE_FAIL", "raw": r.stdout[:200], "stderr": r.stderr[:200]}
+
+
+def run_in(args: list[str], home: str) -> dict:
+    """在隔离 HOME 下运行（沙箱重定向，不污染真实基因库）。"""
+    env = dict(os.environ, HOME=home)
+    r = subprocess.run([sys.executable, str(SCRIPT)] + args,
+                       capture_output=True, text=True, timeout=30, env=env)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {"status": "PARSE_FAIL", "raw": r.stdout[:300], "stderr": r.stderr[:300]}
+
+
+def _seed_rule_genes(home: str, genes: list[dict], name: str = "genes-rule-t.json") -> None:
+    """造一个无 id 字段的规则提取基因文件（模拟 collect_genes 的真实产物）。"""
+    d = Path(home) / ".pi" / "agent" / "evolution" / "genes"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps({"genes": genes}, ensure_ascii=False), encoding="utf-8")
+
+
+def _seed_eval_runs(home: str, task: str, runs: list[dict]) -> None:
+    d = Path(home) / ".pi" / "agent" / "evolution" / f"loop-{task}" / "runs"
+    d.mkdir(parents=True, exist_ok=True)
+    for i, r in enumerate(runs):
+        (d / f"run-{i}.json").write_text(json.dumps(r, ensure_ascii=False), encoding="utf-8")
+        os.utime(d / f"run-{i}.json", (1789000000 + i * 600, 1789000000 + i * 600))
 
 
 def test_health() -> None:
@@ -43,16 +70,19 @@ def test_health_deep() -> None:
 
 
 def test_feedback_record() -> None:
-    d = run(["--feedback", "测试任务", "success", "gene_xyz"])
-    assert d.get("status") == "OK", f"feedback 失败: {d}"
-    assert d["recorded"]["gene_id"] == "gene_xyz" and d["recorded"]["outcome"] == "success"
-    assert d["event_count"] >= 1
-    print("✓ feedback 记录（Φ 正反馈采集）")
+    # 隔离 HOME：测试不得污染真实沙箱（此前直接写 ~/.pi/agent/evolution/feedback.json）
+    with tempfile.TemporaryDirectory() as home:
+        d = run_in(["--feedback", "测试任务", "success", "gene_xyz"], home)
+        assert d.get("status") == "OK", f"feedback 失败: {d}"
+        assert d["recorded"]["gene_id"] == "gene_xyz" and d["recorded"]["outcome"] == "success"
+        assert d["event_count"] >= 1
+    print("✓ feedback 记录（Φ 正反馈采集，沙箱隔离）")
 
 
 def test_feedback_invalid_outcome() -> None:
-    d = run(["--feedback", "t", "maybe", "g"])
-    assert d.get("status") == "BLOCKED", f"非法 outcome 应 BLOCKED: {d}"
+    with tempfile.TemporaryDirectory() as home:
+        d = run_in(["--feedback", "t", "maybe", "g"], home)
+        assert d.get("status") == "BLOCKED", f"非法 outcome 应 BLOCKED: {d}"
     print("✓ feedback 非法 outcome 返回 BLOCKED")
 
 
@@ -64,10 +94,14 @@ def test_feedback_stats() -> None:
 
 
 def test_prune_genes() -> None:
-    d = run(["--prune-genes"])
-    assert d.get("status") == "OK", f"prune 失败: {d}"
-    assert "newly_deprecated" in d and "total_deprecated" in d
-    print("✓ prune_genes（Φ 无效基因淘汰，可回滚）")
+    # 隔离 HOME：prune 会写 deprecated.json，不得污染真实基因库
+    with tempfile.TemporaryDirectory() as home:
+        _seed_rule_genes(home, [{"type": "rule", "source": "gaps", "module": "K",
+                                 "mechanism": "prune 隔离测试基因", "resolution": "x"}])
+        d = run_in(["--prune-genes"], home)
+        assert d.get("status") == "OK", f"prune 失败: {d}"
+        assert "newly_deprecated" in d and "total_deprecated" in d
+    print("✓ prune_genes（Φ 无效基因淘汰，可回滚，沙箱隔离）")
 
 
 def test_status_summary() -> None:
@@ -93,26 +127,25 @@ def test_list_orders() -> None:
 
 
 def test_init_workspace() -> None:
-    with tempfile.TemporaryDirectory() as td:
-        os.environ["HOME_TMP"] = td  # 不实际生效，仅验证返回值
-    d = run(["--init", "test-task"])
-    assert d.get("status") == "OK", f"init 失败: {d}"
-    ws = d.get("workspace", "")
-    assert "test-task" in ws
-    for sub in ("evidence", "gaps", "candidates", "decisions", "runs"):
-        assert sub in d.get("meta", {}).get("dirs", []), f"缺 {sub}"
-    print("✓ init_workspace（五目录结构）")
+    with tempfile.TemporaryDirectory() as home:
+        d = run_in(["--init", "test-task"], home)
+        assert d.get("status") == "OK", f"init 失败: {d}"
+        ws = d.get("workspace", "")
+        assert "test-task" in ws and ws.startswith(home), f"应建在隔离 HOME 下: {ws}"
+        for sub in ("evidence", "gaps", "candidates", "decisions", "runs"):
+            assert sub in d.get("meta", {}).get("dirs", []), f"缺 {sub}"
+    print("✓ init_workspace（五目录结构，沙箱隔离）")
 
 
 def test_substitute_orders() -> None:
-    for order in ("21354", "12534", "14325"):
-        d = run(["--substitute", "demo", "--order", order])
-        assert d.get("status") == "OK", f"{order} 失败: {d}"
-        probes = d.get("substitute", {}).get("probes", [])
-        assert len(probes) == 5, f"{order} 应有 5 个模块探查，实际 {len(probes)}"
-        # 验证路径与顺序
-        path = d["substitute"]["path"]
-        print(f"  ✓ {order}: {path}")
+    with tempfile.TemporaryDirectory() as home:
+        for order in ("21354", "12534", "14325"):
+            d = run_in(["--substitute", "demo", "--order", order], home)
+            assert d.get("status") == "OK", f"{order} 失败: {d}"
+            probes = d.get("substitute", {}).get("probes", [])
+            assert len(probes) == 5, f"{order} 应有 5 个模块探查，实际 {len(probes)}"
+            path = d["substitute"]["path"]
+            print(f"  ✓ {order}: {path}")
     print("✓ substitute（三顺序各 5 模块）")
 
 
@@ -213,6 +246,116 @@ def test_gene_from_memory() -> None:
     print("✓ gene-from-memory（记忆→基因 B 向）")
 
 
+def test_prune_actually_deprecates_rule_genes() -> None:
+    """行为测试（原缺失）：规则提取基因（无 id）必须能被真淘汰，且 match 真归零。
+
+    旧实现用 g.get("id") 判定，无 id 基因恒不淘汰，但 prune 仍返回 OK —— 典型假阳性。
+    """
+    with tempfile.TemporaryDirectory() as home:
+        _seed_rule_genes(home, [
+            {"type": "rule", "source": "gaps", "module": "K",
+             "mechanism": "规则提取基因无id字段，验证淘汰闭环", "resolution": "修派生键"},
+        ])
+        m1 = run_in(["--match", "淘汰闭环"], home)
+        assert m1.get("matched") == 1, f"应匹配到 1 条，实际 {m1}"
+        gid = m1["genes"][0]["id"]
+        assert gid.startswith("derived-"), f"规则基因应派生稳定 id，实际 {gid}"
+
+        for _ in range(2):
+            run_in(["--feedback", "淘汰闭环", "failure", gid], home)
+        dry = run_in(["--prune-genes", "--dry-run"], home)
+        assert gid in dry["would_deprecate"], f"dry-run 应预报淘汰: {dry}"
+        assert dry["effect"]["affected_in_bank"] == 1, f"淘汰必须真影响基因库: {dry['effect']}"
+
+        pr = run_in(["--prune-genes"], home)
+        assert gid in pr["newly_deprecated"], f"应真淘汰: {pr}"
+        assert pr["effect"]["matched_after_prune"] == 0, f"淘汰后应无可匹配基因: {pr['effect']}"
+
+        m2 = run_in(["--match", "淘汰闭环"], home)
+        assert m2.get("matched") == 0, f"淘汰后 match 必须归零（旧实现此处会仍为 1）: {m2}"
+        m3 = run_in(["--match", "淘汰闭环", "--include-deprecated"], home)
+        assert m3.get("matched") == 1, f"include-deprecated 应仍可追溯: {m3}"
+    print("✓ prune 真淘汰（规则基因无 id 也生效，match 归零）")
+
+
+def test_eval_pairs_hit_with_total() -> None:
+    """行为测试（原缺失）：hit/total/rate 必须同源，不得跨 run 拼分子分母。
+
+    A=2/5(0.4) 与 B=3/30(0.1) 不得被拼成 hit=3 total=30 rate=0.4。
+    """
+    with tempfile.TemporaryDirectory() as home:
+        _seed_eval_runs(home, "pairtest", [
+            {"eval_set": "holdout", "summary": {"overall": {"hit": 2, "total": 5, "rate": 0.4}}},
+            {"eval_set": "holdout", "summary": {"overall": {"hit": 3, "total": 30, "rate": 0.1}}},
+        ])
+        d = run_in(["--eval", "pairtest"], home)
+        key = "holdout:overall"
+        assert key in d["summary"], f"缺 {key}: {d}"
+        s = d["summary"][key]
+        assert s["latest"]["hit"] == 3 and s["latest"]["total"] == 30, f"latest 应同源为 3/30: {s}"
+        assert s["latest"]["rate"] == 0.1, f"latest.rate 应为 3/30=0.1（旧实现报 0.4）: {s}"
+        assert s["best"]["rate"] == 0.4, f"best 应单独标注为 0.4: {s}"
+        assert s["runs"] == 2, f"应记录 2 个 run: {s}"
+    print("✓ eval hit/total 同源配对（latest 退步可见，best 单独标注）")
+
+
+def test_gate_blocks_out_of_allowlist() -> None:
+    """行为测试（原缺失）：五层门禁必须真拦截，而非只有文档。"""
+    d = run(["--gate", "/Users/appleoppa/PGG-WIKI/memory/MEMORY.md", "--gate-backup", "scripts"])
+    assert d.get("status") == "BLOCKED", f"canonical memory 越界应 BLOCKED: {d}"
+    assert "L2_allowlist" in d.get("failed_layers", []), f"应由 L2 拦截: {d}"
+    assert d.get("allow_apply") is False, f"越界不得放行: {d}"
+    print("✓ gate L2 拦截越界路径（碰 canonical memory 被挡）")
+
+
+def test_gate_blocks_secret_and_danger() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        bk = Path(home) / "bk"
+        bk.mkdir()
+        (bk / "a.py.bak").write_text("x", encoding="utf-8")
+        # 假密钥/危险命令在运行时拼接：避免测试源码自身被 L4/L5 扫成命中（自指误报）
+        fake_key = "sk-" + "a" * 24 + "xyz123"
+        force_flag = "--" + "force"
+        diff = (f'+api_key = "{fake_key}"\n'
+                f"+subprocess.run(['git', 'push', '{force_flag}'])\n")
+        spec = importlib.util.spec_from_file_location("se_mod", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        r = mod.apply_gate(["scripts/a.py"], diff, backup_dir=str(bk))
+        assert r["status"] == "BLOCKED", f"密钥+force push 应 BLOCKED: {r}"
+        assert "L4_secret_scan" in r["failed_layers"], f"应由 L4 拦截密钥: {r['failed_layers']}"
+        assert "L5_danger" in r["failed_layers"], f"应由 L5 拦截危险模式: {r['failed_layers']}"
+        hits = r["checks"]["L4_secret_scan"]["hits"]
+        assert hits and "sha1" in hits[0], f"密钥只应记 hash 不记明文: {hits}"
+        assert fake_key not in json.dumps(r), "不得回显密钥明文"
+    print("✓ gate L4/L5 拦截密钥与危险模式（只记 hash 不回显明文）")
+
+
+def test_gate_passes_clean_change() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        bk = Path(home) / "bk"
+        bk.mkdir()
+        (bk / "a.py.bak").write_text("x", encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("se_mod2", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        r = mod.apply_gate(["scripts/a.py"], "+print('ok')\n", backup_dir=str(bk))
+        assert r["status"] == "PASS" and r["allow_apply"] is True, f"干净变更应 PASS: {r}"
+    print("✓ gate 干净变更放行（L1-L5 全过）")
+
+
+def test_substitute_persists() -> None:
+    """行为测试（原缺失）：substitute 结果必须落盘（旧版注释称记录到 gaps/ 但实际不写）。"""
+    with tempfile.TemporaryDirectory() as home:
+        d = run_in(["--substitute", "persisttest", "--order", "21354"], home)
+        assert d.get("status") == "OK", f"substitute 失败: {d}"
+        rec = d.get("recorded_to")
+        assert rec and Path(rec).exists(), f"必须落盘可追: {d}"
+        saved = json.loads(Path(rec).read_text(encoding="utf-8"))
+        assert saved["order"] == "21354" and len(saved["probes"]) == 5, f"落盘内容应完整: {saved}"
+    print("✓ substitute 结果落盘（Observe 阶段有证据可追）")
+
+
 def main() -> None:
     test_health()
     test_health_deep()
@@ -234,6 +377,13 @@ def main() -> None:
     test_match_filters_deprecated()
     test_gene_sync_missing_workspace()
     test_gene_from_memory()
+    # 真行为测试（补齐"只验不崩"短板：验证行为正确性而非不崩溃）
+    test_prune_actually_deprecates_rule_genes()
+    test_eval_pairs_hit_with_total()
+    test_gate_blocks_out_of_allowlist()
+    test_gate_blocks_secret_and_danger()
+    test_gate_passes_clean_change()
+    test_substitute_persists()
     test_feedback_record()
     test_feedback_invalid_outcome()
     test_feedback_stats()
