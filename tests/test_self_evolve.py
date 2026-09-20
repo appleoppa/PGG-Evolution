@@ -356,6 +356,90 @@ def test_substitute_persists() -> None:
     print("✓ substitute 结果落盘（Observe 阶段有证据可追）")
 
 
+def test_evidence_rejects_insufficient() -> None:
+    """行为测试：证据等级不够必须被拒（不得用文件存在冒充能力）。"""
+    with tempfile.TemporaryDirectory() as home:
+        # E1 谎报不存在的工件
+        d = run_in(["--evidence", "CLM-T1", "--level", "E1", "--artifact", "/nope/x.py"], home)
+        assert d.get("status") == "BLOCKED", f"E1 工件不存在必须拒绝: {d}"
+        # E5 不给校验命令
+        d = run_in(["--evidence", "CLM-T1", "--level", "E5", "--artifact", "scripts/self_evolve.py"], home)
+        assert d.get("status") == "BLOCKED", f"E5 无 verify-cmd 必须拒绝: {d}"
+        # E5 给了命令但不 --execute
+        d = run_in(["--evidence", "CLM-T1", "--level", "E5", "--artifact", "scripts/self_evolve.py",
+                    "--verify-cmd", "true"], home)
+        assert d.get("status") == "BLOCKED" and "未执行" in d["reason"], f"未授权不得真跑: {d}"
+        # E2 符号名不在工件里
+        d = run_in(["--evidence", "CLM-T1", "--level", "E2", "--artifact", "scripts/self_evolve.py",
+                    "--note", "绝对不存在的符号zzz"], home)
+        assert d.get("status") == "BLOCKED", f"E2 符号未命中必须拒绝: {d}"
+    print("✓ evidence 拒绝证据不足（谎报工件/命令/符号全部被拦）")
+
+
+def test_evidence_empty_file_and_single_run_rejected() -> None:
+    """行为测试：空文件不得冒充 E8；单次 run 不得冒充 E9。"""
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp:
+        empty = Path(tmp) / "empty.json"
+        empty.write_text("", encoding="utf-8")
+        d = run_in(["--evidence", "CLM-T2", "--level", "E8", "--artifact", str(empty)], home)
+        assert d.get("status") == "BLOCKED" and "为空" in d["reason"], f"空文件必须拒绝: {d}"
+        one = Path(tmp) / "one.json"
+        one.write_text(json.dumps({"task": "t", "receipt": "r", "run": "only one"}), encoding="utf-8")
+        d = run_in(["--evidence", "CLM-T3", "--level", "E9", "--artifact", str(one)], home)
+        assert d.get("status") == "BLOCKED" and "复现" in d["reason"], f"单次 run 必须拒绝: {d}"
+    print("✓ evidence 拒绝空文件冒充 E8 / 单次 run 冒充 E9")
+
+
+def test_evidence_state_derivation() -> None:
+    """行为测试：状态派生必须按证据链，且不得跳级。"""
+    with tempfile.TemporaryDirectory() as home:
+        E = "scripts/self_evolve.py"
+        # 只有 E2（代码存在）→ PARTIAL，绝不能是 VERIFIED
+        run_in(["--evidence", "CLM-T4", "--level", "E2", "--artifact", E, "--note", "apply_gate"], home)
+        d = run_in(["--evidence-status", "CLM-T4"], home)
+        c = d["claims"][0]
+        assert c["allowed_state"] == "PARTIAL", f"只有 E2 应为 PARTIAL: {c}"
+        assert "掩盖失败" in c["forbidden_wording"], f"PARTIAL 必须禁用夸大表述: {c}"
+        # 补 E3+E5 但缺 E7 → IMPLEMENTED_NOT_WIRED（不得称已接线）
+        run_in(["--evidence", "CLM-T4", "--level", "E3", "--artifact", E,
+                "--verify-cmd", "python3 scripts/self_evolve.py --health", "--execute"], home)
+        run_in(["--evidence", "CLM-T4", "--level", "E5", "--artifact", E,
+                "--verify-cmd", "true", "--execute"], home)
+        # 读回不带 --execute 时命令类证据保守失效（不得凭旧回执冒充已接线）
+        c = run_in(["--evidence-status", "CLM-T4"], home)["claims"][0]
+        assert set(c["stale_levels"]) == {"E3", "E5"}, f"未重跑的命令证据应失效: {c}"
+        assert c["allowed_state"] == "PARTIAL", f"保守降级后应为 PARTIAL: {c}"
+        # 带 --execute 重跑后才升 IMPLEMENTED_NOT_WIRED（仍不得称已接线）
+        c = run_in(["--evidence-status", "CLM-T4", "--execute"], home)["claims"][0]
+        assert c["allowed_state"] == "IMPLEMENTED_NOT_WIRED", f"E2/E3/E5 无 E7 应为 IMPLEMENTED_NOT_WIRED: {c}"
+        assert "生产可用" in c["forbidden_wording"], f"必须禁用生产可用表述: {c}"
+        # 跳级：只登记 E8 而无前置 → 不得升 VERIFIED
+        run_in(["--evidence", "CLM-T5", "--level", "E8", "--artifact", "/tmp/e8.json"], home)
+        c = run_in(["--evidence-status", "CLM-T5"], home)["claims"][0]
+        assert c["allowed_state"] != "VERIFIED", f"E8 缺前置不得跳级为 VERIFIED: {c}"
+    print("✓ evidence 状态派生按链且不跳级（含未重跑命令保守降级）")
+
+
+def test_evidence_exaggeration_and_downgrade() -> None:
+    """行为测试：夸大词必须判 INVALID_EXAGGERATED；工件失效必须降级。"""
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp:
+        E = "scripts/self_evolve.py"
+        run_in(["--evidence", "CLM-T6", "--level", "E2", "--artifact", E, "--note", "apply_gate",
+                "--claim-text", "系统已实现 AGI，零幻觉"], home)
+        c = run_in(["--evidence-status", "CLM-T6"], home)["claims"][0]
+        assert c["allowed_state"] == "INVALID_EXAGGERATED", f"夸大词应判 INVALID_EXAGGERATED: {c}"
+        assert len(c["exaggeration_hits"]) >= 2, f"应命中 AGI 与零幻觉: {c['exaggeration_hits']}"
+        # 降级：登记后删除工件，高等级必须失效
+        art = Path(tmp) / "art.py"
+        art.write_text("def apply_gate(): pass\n", encoding="utf-8")
+        run_in(["--evidence", "CLM-T7", "--level", "E2", "--artifact", str(art), "--note", "apply_gate"], home)
+        assert run_in(["--evidence-status", "CLM-T7"], home)["claims"][0]["valid_levels"] == ["E2"]
+        art.unlink()
+        c = run_in(["--evidence-status", "CLM-T7"], home)["claims"][0]
+        assert c["valid_levels"] == [] and "E2" in c["stale_levels"], f"工件失效必须降级: {c}"
+    print("✓ evidence 夸大词拦截 + 工件失效自动降级")
+
+
 def main() -> None:
     test_health()
     test_health_deep()
@@ -384,6 +468,11 @@ def main() -> None:
     test_gate_blocks_secret_and_danger()
     test_gate_passes_clean_change()
     test_substitute_persists()
+    # 证据等级账本（E0-E9）行为测试
+    test_evidence_rejects_insufficient()
+    test_evidence_empty_file_and_single_run_rejected()
+    test_evidence_state_derivation()
+    test_evidence_exaggeration_and_downgrade()
     test_feedback_record()
     test_feedback_invalid_outcome()
     test_feedback_stats()

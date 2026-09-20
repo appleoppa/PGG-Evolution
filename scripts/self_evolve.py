@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -71,9 +72,330 @@ DIMENSION_PROBES = {
     "14": "有没有引入新组合/新方法？创造力维度被忽略了吗？",
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# 证据等级账本（E0-E9）与能力状态派生
+#
+# 依据：开智与进化成果包 D04《能力证据与验收标准》
+# 规则：等级不可跳跃；高层证据失效时自动降级；分数/投票/历史 PASS 不折抵。
+# 这是把「文件存在不等于能力完成」从口头纪律变成可执行校验。
+# ══════════════════════════════════════════════════════════════════════
+
+EVIDENCE_LEVELS = {
+    "E0": {"name": "文本主张", "needs": "note", "proves": "材料提出或记录过某说法",
+           "cannot": "实现、性能、部署、有效性"},
+    "E1": {"name": "文件存在", "needs": "file", "proves": "某文件在指定时点可定位",
+           "cannot": "可解析、可执行、内容当前有效"},
+    "E2": {"name": "代码存在", "needs": "symbol", "proves": "指定工作树存在相应实现文本",
+           "cannot": "可 import、正确性、调用关系、实际使用"},
+    "E3": {"name": "import/加载", "needs": "exec", "proves": "指定版本在该环境的加载接口可用",
+           "cannot": "测试通过、入口可执行、运行时已接线"},
+    "E4": {"name": "测试存在", "needs": "file", "proves": "覆盖意图或测试文本存在",
+           "cannot": "可收集、通过、覆盖充分、功能正确"},
+    "E5": {"name": "测试通过", "needs": "exec", "proves": "指定测试范围内的局部行为通过",
+           "cannot": "入口、集成、生产路径、真实任务、长期稳定"},
+    "E6": {"name": "入口可执行", "needs": "exec", "proves": "该入口在该环境该命令范围可运行",
+           "cannot": "全部功能已接线、真实任务价值、生产授权"},
+    "E7": {"name": "运行时接线", "needs": "file", "proves": "指定运行路径确实使用该组件",
+           "cannot": "真实任务已验收、广泛稳定、性能改善"},
+    "E8": {"name": "真实任务闭环", "needs": "file", "proves": "该版本在限定任务/环境/风险范围完成闭环",
+           "cannot": "对其他任务、版本、环境或长期表现的泛化"},
+    "E9": {"name": "长期稳定/外部评测", "needs": "file", "proves": "限定期间、任务集和协议下的稳定性/效果",
+           "cannot": "AGI、ASI、零错误、无限自治、职业替代"},
+}
+
+# 等级前置依赖：声称高等级必须能回溯到低等级（D04「证据链不可跳跃」）
+# 例：E8 真实任务闭环必须能回溯到实现(E2)、可加载(E3)、测试通过(E5)、入口(E6)、接线(E7)
+EVIDENCE_PREREQS = {
+    "E0": set(),
+    "E1": set(),
+    "E2": set(),
+    "E3": {"E2"},
+    "E4": set(),
+    "E5": {"E2", "E3"},
+    "E6": {"E2", "E3"},
+    "E7": {"E2", "E3", "E6"},
+    "E8": {"E2", "E3", "E5", "E6", "E7"},
+    "E9": {"E8"},
+}
+
+# 绝对化/夸大表述（来源：成果包 D07 §4.1 主方案排除词表）
+# 用于防止「开始冒充完成」「文件冒充能力」类声明进入主张登记。
+EXAGGERATION_PATTERNS = [
+    r"A\s*G\s*I(?![a-zA-Z])", r"A\s*S\s*I(?![a-zA-Z])", r"T5(?![0-9])",
+    r"零幻觉", r"永不出错", r"永不重复犯错", r"根除矛盾", r"修复所有\s*bug",
+    r"完全自治", r"全程无人干预", r"无人值守", r"无限迭代", r"永久自优化", r"永生进化",
+    r"替代律师", r"保证胜诉", r"保证立案", r"超越所有人类",
+    r"所有模型继承", r"驱动全部\s*LLM", r"人工门\s*H\s*=\s*0",
+    r"神技能", r"过目不忘", r"自动扩权", r"自动改权重", r"永久固化",
+    r"CMMI\s*最高标准", r"14\s*数据集有效",
+]
+
+
+def _resolve_artifact(artifact: str) -> Path:
+    """解析证据工件路径：相对路径优先按仓库根解析，其次按当前目录。"""
+    p = Path(artifact).expanduser()
+    if p.is_absolute():
+        return p
+    repo_candidate = PLUGIN_DIR.parent / p
+    if repo_candidate.exists():
+        return repo_candidate
+    return Path.cwd() / p
+
+
+def _evidence_ledger_path() -> Path:
+    return SANDBOX / "evidence" / "ledger.json"
+
+
+def _load_evidence_ledger() -> dict:
+    p = _evidence_ledger_path()
+    if not p.is_file():
+        return {"schema": "pgg-evolution/evidence/v1", "claims": {}}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"schema": "pgg-evolution/evidence/v1", "claims": {}, "corrupt": True}
+    d.setdefault("claims", {})
+    return d
+
+
+def _save_evidence_ledger(led: dict) -> None:
+    p = _evidence_ledger_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    led["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    p.write_text(json.dumps(led, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def scan_exaggeration(text: str) -> list[str]:
+    """扫描绝对化/夸大表述，返回命中模式（D07 排除词表）。"""
+    hits = []
+    for pat in EXAGGERATION_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            hits.append(pat)
+    return hits
+
+
+def _verify_level(level: str, artifact: str, verify_cmd: str | None,
+                  execute: bool, note: str) -> dict:
+    """校验某等级的最低证据要求是否真的满足。ok=False 表示不得登记为该等级。
+
+    E0 需说明文本；E1/E4/E7/E8/E9 需工件存在（E7-E9 另需最低内容特征）；
+    E2 需在 note 给出符号名并在工件中命中；E3/E5/E6 需 --execute 真跑命令。
+    """
+    needs = EVIDENCE_LEVELS[level]["needs"]
+
+    if needs == "note":
+        if not (note and note.strip()):
+            return {"ok": False, "kind": "missing", "detail": "E0 文本主张需非空 --note 说明"}
+        return {"ok": True, "kind": "declared", "detail": "文本主张已登记（仅证明有人提出过）"}
+
+    if not artifact:
+        return {"ok": False, "kind": "missing",
+                "detail": f"{level} 需 --artifact 绑定证据工件（证据必须绑定具体对象）"}
+    path = _resolve_artifact(artifact)
+
+    if needs in ("file", "symbol"):
+        if not path.is_file():
+            return {"ok": False, "kind": "missing", "detail": f"工件不存在或非文件: {path}"}
+        if needs == "symbol":
+            sym = (note or "").strip()
+            if not sym:
+                return {"ok": False, "kind": "missing", "detail": "E2 需在 --note 给出要核验的符号名（函数/类名）"}
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return {"ok": False, "kind": "error", "detail": str(exc)}
+            if sym not in body:
+                return {"ok": False, "kind": "missing", "detail": f"工件中未命中符号: {sym}"}
+        # E7-E9 需要最低内容特征，避免「随便一个空文件冒充回执」
+        if level in ("E7", "E8", "E9"):
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return {"ok": False, "kind": "error", "detail": str(exc)}
+            if not body.strip():
+                return {"ok": False, "kind": "missing", "detail": f"{level} 工件为空，不能作为证据"}
+            if level == "E7" and not re.search(r"trace|readback|接线|调用链|runtime", body, re.IGNORECASE):
+                return {"ok": False, "kind": "missing",
+                        "detail": "E7 工件需含 trace/readback/接线/调用链 等运行追踪特征"}
+            if level == "E8" and not re.search(r"task|receipt|回执|任务", body, re.IGNORECASE):
+                return {"ok": False, "kind": "missing",
+                        "detail": "E8 工件需含 task/receipt/回执/任务 等闭环特征"}
+            if level == "E9":
+                reps = len(re.findall(r"\brun\b|repro|复现", body, re.IGNORECASE))
+                if reps < 2:
+                    return {"ok": False, "kind": "missing",
+                            "detail": f"E9 需 ≥2 次独立复现记录（当前识别 {reps}）"}
+        return {"ok": True, "kind": "file", "detail": f"已核验存在: {path}"}
+
+    if needs == "exec":
+        if not verify_cmd:
+            return {"ok": False, "kind": "missing", "detail": f"{level} 需要 --verify-cmd 给出可执行校验命令"}
+        if not execute:
+            return {"ok": False, "kind": "declared",
+                    "detail": f"命令未执行（需 --execute 显式授权才真跑）: {verify_cmd}"}
+        try:
+            proc = subprocess.run(verify_cmd, shell=True, capture_output=True,
+                                  text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "kind": "timeout", "detail": "校验命令超时（>120s）"}
+        except OSError as exc:
+            return {"ok": False, "kind": "error", "detail": str(exc)}
+        ok = proc.returncode == 0
+        return {"ok": ok, "kind": "executed", "detail": f"exit={proc.returncode}",
+                "stdout_tail": (proc.stdout or "")[-400:],
+                "stderr_tail": (proc.stderr or "")[-400:]}
+
+    return {"ok": False, "kind": "error", "detail": f"未知 needs: {needs}"}
+
+
+def evidence_record(claim_id: str, level: str, artifact: str = "",
+                    verify_cmd: str | None = None, execute: bool = False,
+                    note: str = "", claim_text: str = "") -> dict:
+    """登记一条主张的证据：先校验该等级最低要求，不满足则拒绝登记。
+
+    note 与 claim_text 分工：note 供等级校验用（E0 主张 / E2 符号名），
+    claim_text 是主张原文（夸大词扫描用），两者不可互相污染。
+    """
+    if level not in EVIDENCE_LEVELS:
+        return {"status": "BLOCKED", "reason": f"无效等级 {level}，可选 {'/'.join(EVIDENCE_LEVELS)}"}
+    claim_id = (claim_id or "").strip()
+    if not claim_id:
+        return {"status": "BLOCKED", "reason": "需给出主张 id（--evidence <CLAIM_ID>）"}
+
+    check = _verify_level(level, artifact, verify_cmd, execute, note)
+    if not check["ok"]:
+        return {"status": "BLOCKED", "claim_id": claim_id, "level": level,
+                "reason": f"{level} 最低证据要求未满足: {check['detail']}", "check": check}
+
+    led = _load_evidence_ledger()
+    claim = led["claims"].setdefault(claim_id, {"claim_id": claim_id, "statement": "", "entries": []})
+    # 主张原文：优先 --claim-text；否则 E0 的 note 就是主张原文
+    text = (claim_text or "").strip() or (note.strip() if level == "E0" else "")
+    if text and not claim.get("statement"):
+        claim["statement"] = text[:300]
+    # 同等级同工件只保留最新一条
+    claim["entries"] = [e for e in claim["entries"]
+                        if not (e.get("level") == level and e.get("artifact") == artifact)]
+    claim["entries"].append({
+        "level": level,
+        "artifact": artifact,
+        "verify_cmd": verify_cmd,
+        "note": note,
+        "kind": check["kind"],
+        "detail": check["detail"],
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "exaggeration_hits": scan_exaggeration(note or ""),
+    })
+    claim["entries"].sort(key=lambda e: list(EVIDENCE_LEVELS).index(e["level"]))
+    _save_evidence_ledger(led)
+    return {"status": "OK", "claim_id": claim_id, "level": level, "check": check,
+            "statement": claim.get("statement", ""),
+            "exaggeration_hits": scan_exaggeration(claim.get("statement", "")),
+            "ledger": str(_evidence_ledger_path())}
+
+
+def _highest_valid_chain(valid: list[str]) -> str | None:
+    """按前置依赖算**最高可支撑等级**：自身有效且其全部前置也有效。
+
+    不做「E0..En 必须逐个存在」的死板连继，因为 E1（文件存在）本就被 E2/E3 包含；
+    但也不允许跳级——E5 没有 E2/E3 支撑就不算数。
+    """
+    s = set(valid)
+    best = None
+    for lv in EVIDENCE_LEVELS:          # 按 E0→E9 顺序
+        if lv in s and EVIDENCE_PREREQS[lv] <= s:
+            best = lv
+    return best
+
+
+def _derive_capability_state(valid_levels: list[str], highest: str | None, statement: str) -> dict:
+    """按证据链派生**允许的**状态词；分数、文件数、模型自评均不触发升级。"""
+    s = set(valid_levels)
+    if scan_exaggeration(statement) and "E8" not in s:
+        return {"state": "INVALID_EXAGGERATED",
+                "wording": "该表述无效/夸大（含绝对化词且无 E8 真实任务证据）",
+                "forbidden": "任何现状、能力、部署表述"}
+    if highest == "E9" or ("E8" in s and EVIDENCE_PREREQS["E8"] <= s and "E9" in s):
+        return {"state": "VERIFIED_E9",
+                "wording": "在说明的任务集/期间/协议下表现稳定（仍需限定范围）",
+                "forbidden": "永不失败、AGI/ASI、替代专业人员"}
+    if "E8" in s and EVIDENCE_PREREQS["E8"] <= s:
+        return {"state": "VERIFIED",
+                "wording": "在给定版本/环境/任务范围内经真实任务闭环验证",
+                "forbidden": "长期稳定、SLA、通用有效"}
+    if {"E2", "E3", "E5"} <= s and "E7" not in s:
+        return {"state": "IMPLEMENTED_NOT_WIRED",
+                "wording": "实现并经局部验证，尚未证实运行时接线/真实任务",
+                "forbidden": "已部署、已启用、已接入、生产可用"}
+    if s - {"E0"}:
+        return {"state": "PARTIAL",
+                "wording": f"局部证据存在（最高可支撑 {highest or '无'}），关键链路缺口未补",
+                "forbidden": "把局部通过掩盖失败，或把未运行写为通过"}
+    if "E0" in s:
+        return {"state": "HISTORICAL",
+                "wording": "历史记录/待重新核验",
+                "forbidden": "作为当前资产、能力或部署凭据"}
+    return {"state": "NEEDS_EVIDENCE", "wording": "无有效证据", "forbidden": "任何能力表述"}
+
+
+def evidence_status(claim_id: str | None = None, execute: bool = False) -> dict:
+    """读回证据链：**重新校验**每条证据，算最高连续有效等级，派生允许的状态词。
+
+    命令类证据（E3/E5/E6）默认不重跑；未重跑即不计入有效等级（保守降级）。
+    """
+    led = _load_evidence_ledger()
+    if led.get("corrupt"):
+        return {"status": "DEGRADED", "reason": "证据账本损坏，无法读回"}
+    claims = led["claims"]
+    if claim_id:
+        claim_id = claim_id.strip()
+        if claim_id not in claims:
+            return {"status": "BLOCKED", "reason": f"无此主张: {claim_id}"}
+        claims = {claim_id: claims[claim_id]}
+
+    order = list(EVIDENCE_LEVELS)
+    out = []
+    for cid, claim in claims.items():
+        rechecked = []
+        for entry in claim.get("entries", []):
+            # 用**登记当时**的 note 重校，否则 E2 的符号名会因取错字段而误降级
+            check = _verify_level(entry["level"], entry.get("artifact", ""),
+                                  entry.get("verify_cmd"), execute,
+                                  entry.get("note", "") or claim.get("statement", ""))
+            rechecked.append({**entry, "recheck_ok": check["ok"],
+                              "recheck_kind": check["kind"], "recheck_detail": check["detail"]})
+        valid = [e["level"] for e in rechecked if e["recheck_ok"]]
+        highest = _highest_valid_chain(valid)
+        state = _derive_capability_state(valid, highest, claim.get("statement", ""))
+        out.append({
+            "claim_id": cid,
+            "statement": claim.get("statement", ""),
+            "entries": rechecked,
+            "valid_levels": valid,
+            "stale_levels": [e["level"] for e in rechecked if not e["recheck_ok"]],
+            "highest_contiguous": highest,
+            "allowed_state": state["state"],
+            "allowed_wording": state["wording"],
+            "forbidden_wording": state["forbidden"],
+            "exaggeration_hits": scan_exaggeration(claim.get("statement", "")),
+        })
+    return {"status": "OK", "count": len(out),
+            "recheck_executed": execute, "claims": out}
+
 
 def _correlation_id() -> str:
     return f"se-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+
+
+def _evidence_and_ledger_summary() -> dict:
+    """给 --status 用的证据账本概览（只读，不重跑命令）。"""
+    led = _load_evidence_ledger()
+    claims = led.get("claims", {})
+    return {
+        "claims": len(claims),
+        "entries": sum(len(c.get("entries", [])) for c in claims.values()),
+        "corrupt": bool(led.get("corrupt")),
+    }
 
 
 def _load_llm_provider(provider: str) -> dict:
@@ -606,8 +928,9 @@ def status_summary() -> dict:
         "genes": {"files": len(gene_files), "total": total_genes, "deprecated": len(_load_deprecated_ids())},
         "feedback": {"events": len(events), "success": success, "failure": failure,
                       "success_rate": round(success / len(events), 3) if events else 0.0},
+        "evidence": _evidence_and_ledger_summary(),
         "repair_hint": h["repair_hint"],
-        "note": "统一状态入口：健康/基因/反馈一处可查（Λ_ctx 切换损耗收敛）",
+        "note": "统一状态入口：健康/基因/反馈/证据账本一处可查（Λ_ctx 切换损耗收敛）",
     }
 
 
@@ -1083,6 +1406,15 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="配合 --prune-genes：只报告影响范围，不写盘")
     ap.add_argument("--gate", nargs="*", metavar="PATH", help="五层应用门禁 L1-L5 自检（无参时取 git 工作区变更；可显式传路径）")
     ap.add_argument("--gate-backup", metavar="DIR", help="--gate 的 L1 备份目录")
+    ap.add_argument("--evidence", metavar="CLAIM_ID", help="登记一条主张的证据等级（需 --level；不满足最低要求则拒绝登记）")
+    ap.add_argument("--level", choices=list(EVIDENCE_LEVELS), help="证据等级 E0-E9（配合 --evidence）")
+    ap.add_argument("--artifact", default="", metavar="PATH", help="证据工件路径（E1-E9）")
+    ap.add_argument("--verify-cmd", metavar="CMD", help="E3/E5/E6 的可执行校验命令")
+    ap.add_argument("--execute", action="store_true", help="显式授权真跑校验命令（否则只登记不执行）")
+    ap.add_argument("--note", default="", help="说明：E0 的主张文本 / E2 的符号名 / 其他备注")
+    ap.add_argument("--claim-text", default="", metavar="TEXT", help="主张原文（夸大词扫描用；与 --note 分离，避免 E2 符号名占用此位）")
+    ap.add_argument("--evidence-status", nargs="?", const="", metavar="CLAIM_ID", help="读回证据链，派生允许的状态词（不带值=全部）")
+    ap.add_argument("--list-levels", action="store_true", help="列出 E0-E9 证据等级及其能/不能证明什么")
     ap.add_argument("--include-deprecated", action="store_true", help="匹配/统计时包含已淘汰基因")
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
@@ -1118,6 +1450,22 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0 if result["allow_apply"] else 1)
 
+    if args.list_levels:
+        for k, v in EVIDENCE_LEVELS.items():
+            print(f"{k} {v['name']:<12} 需要={v['needs']:<7} 可证={v['proves']}")
+        return 0
+    if args.evidence:
+        if not args.level:
+            print(json.dumps({"status": "BLOCKED", "reason": "需 --level E0-E9"}, ensure_ascii=False))
+            return 2
+        r = evidence_record(args.evidence, args.level, args.artifact,
+                            args.verify_cmd, args.execute, args.note, args.claim_text)
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r["status"] == "OK" else 1
+    if args.evidence_status is not None:
+        print(json.dumps(evidence_status(args.evidence_status or None, args.execute),
+                         ensure_ascii=False, indent=2))
+        return 0
     if args.prune_genes is not None:
         try:
             thr = float(args.prune_genes)

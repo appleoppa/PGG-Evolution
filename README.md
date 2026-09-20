@@ -25,9 +25,9 @@
 3. **诚实验证**（warmup/holdout 分离评测，只有 holdout 提升才算真进化）
 
 **能力边界（避免预期落差）**：
-- ✅ 提供：方法论、门禁、评测方法、基因复用与淘汰、证据链格式
+- ✅ 提供：方法论、门禁、**证据等级账本**、评测方法、基因复用与淘汰、证据链格式
 - ❌ 不提供：自主发现新目标、自主改写自身代码、无人工审批的自动发布
-- ⚠️ `Ancient` 等因子为**启发式分类命名**，不参与数值计算，不得用作评分来源（见 `docs/FORMULAS.md`）
+- ⚠️ `Ancient` 等因子为**启发式分类命名**，默认 1.0 数值中性，不得用作评分来源（见 `docs/FORMULAS.md`）
 
 ## 快速开始
 
@@ -46,6 +46,11 @@ python3 tests/test_self_evolve.py
 
 # 5. 变更前跑五层应用门禁（L1 备份 / L2 白名单 / L3 diff 大小 / L4 密钥 / L5 危险模式）
 python3 scripts/self_evolve.py --gate              # 无参=检查 git 工作区变更
+
+# 6. 登记证据等级，防止「文件存在冒充能力完成」（详见 docs/EVIDENCE.md）
+python3 scripts/self_evolve.py --evidence CLM-001 --level E2 \
+    --artifact scripts/self_evolve.py --note apply_gate
+python3 scripts/self_evolve.py --evidence-status CLM-001   # 读回并派生允许的状态词
 ```
 
 ## 目录结构
@@ -58,6 +63,7 @@ PGG-Evolution/
 │   ├── THREE_ORDERS.md  # 三顺序代入方法（21354/12534/14325）
 │   ├── LOOP.md          # 证据驱动受控闭环流程（Observe→...→Record）
 │   ├── GATES.md         # 五层门禁 + 三重进化门禁
+│   ├── EVIDENCE.md      # 证据等级账本 E0-E9（可执行的诚实性内核）
 │   └── USAGE.md         # 详细使用说明
 ├── scripts/
 │   └── self_evolve.py   # 自进化引擎（可执行，通用，不绑定宿主）

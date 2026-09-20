@@ -34,6 +34,43 @@ jobs:
         run: |
           SELF_EVOLUTION_PLUGIN_DISABLED=1 python3 scripts/self_evolve.py --health | grep '"status": "DISABLED"'
 
+      - name: Verify evidence ledger rejects insufficient proof (等级不够必须被拒)
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          with tempfile.TemporaryDirectory() as home:
+              env = dict(os.environ, HOME=home)
+              def run(*a):
+                  r = subprocess.run([sys.executable, str(script), *a], capture_output=True, text=True, env=env)
+                  return r.returncode, json.loads(r.stdout)
+              # 1) 谎报工件 → 必拒
+              rc, d = run("--evidence", "C1", "--level", "E1", "--artifact", "/nope/x.py")
+              assert d["status"] == "BLOCKED" and rc == 1, d
+              # 2) E5 无校验命令 → 必拒
+              rc, d = run("--evidence", "C1", "--level", "E5", "--artifact", "scripts/self_evolve.py")
+              assert d["status"] == "BLOCKED", d
+              # 3) 有命令但不 --execute → 必拒（不得静默真跑）
+              rc, d = run("--evidence", "C1", "--level", "E5", "--artifact", "scripts/self_evolve.py", "--verify-cmd", "true")
+              assert d["status"] == "BLOCKED" and "未执行" in d["reason"], d
+              # 4) 跳级：只有 E2 不得称 VERIFIED
+              run("--evidence", "C2", "--level", "E2", "--artifact", "scripts/self_evolve.py", "--note", "apply_gate")
+              _, s = run("--evidence-status", "C2")
+              assert s["claims"][0]["allowed_state"] == "PARTIAL", s
+              assert "掩盖失败" in s["claims"][0]["forbidden_wording"], s
+              # 5) 夸大词 + 无 E8 → INVALID_EXAGGERATED
+              run("--evidence", "C3", "--level", "E2", "--artifact", "scripts/self_evolve.py",
+                  "--note", "apply_gate", "--claim-text", "系统已实现 AGI，零幻觉")
+              _, s = run("--evidence-status", "C3")
+              assert s["claims"][0]["allowed_state"] == "INVALID_EXAGGERATED", s
+              # 6) 空文件不得冒充 E8
+              empty = Path(home) / "empty.json"; empty.write_text("", encoding="utf-8")
+              rc, d = run("--evidence", "C4", "--level", "E8", "--artifact", str(empty))
+              assert d["status"] == "BLOCKED", d
+              print("evidence 账本行为验证通过（谎报/跳级/夸大/空文件全部被拦）")
+          PY
+
       - name: Verify example curve script
         run: |
           python3 examples/plot_evolution_curve.py
