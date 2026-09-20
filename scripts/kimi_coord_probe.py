@@ -20,11 +20,15 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import struct
 import subprocess
 import sys
 
-BIN = "/Applications/KimiCU.app/Contents/MacOS/kimi-cu"
+# 允许用环境变量覆盖二进制路径，供测试**忠实模拟**「无 kimi-cu 环境」
+# （如 CI ubuntu）。仅用遮蔽 launchctl 不够——kimi-cu 仍可用，探针会真成功，
+# 测不出环境不满足时的行为（2026-09-20 实测发现模拟不忠实）。
+BIN = os.environ.get("KIMI_CU_BIN") or "/Applications/KimiCU.app/Contents/MacOS/kimi-cu"
 KIMI_BIN = BIN  # 别名（diagnose_service 用）
 
 
