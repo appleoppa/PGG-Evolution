@@ -912,6 +912,124 @@ def test_readonly_mode_blocks_writes() -> None:
     print("✓ 只读模式：写必拦(exit=1)/读必放行/兜底层不静默跳过")
 
 
+def test_promotion_authority_matrix_read_only_and_fail_closed() -> None:
+    """Promotion Authority Matrix v0.2：只读、fail-closed、高风险必人工。
+
+    背景（资源盘任务清单问题 1）：v0.1 把基因库路径硬编码为已退役的 Hermes
+    路径 `~/.hermes/workspace/.../apex_evolution_genes.sqlite3`，该文件不存在，
+    工具一跑即崩。这是「工具装好 ≠ 能力可用」的同构反例——v0.2 改读当前正本
+    JSON 基因库，并接只读门禁。
+
+    核心不变式（防橡皮图章）：
+      ① 只读模式下写必拦 exit=1
+      ② 基因库不可读一律 fail-closed（不静默返回空）
+      ③ 高风险 lane（法律/凭据/内核）即使证据齐也必须人工
+      ④ status/fitness 单独绝不构成晋升依据
+      ⑤ 证据不齐 → WATCH，绝不放行
+    """
+    import importlib.util, tempfile, shutil
+
+    tool = Path(__file__).resolve().parent.parent / "scripts" / "promotion_authority_matrix.py"
+    assert tool.is_file(), f"工具不存在: {tool}"
+    spec = importlib.util.spec_from_file_location("pam", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    tmp = Path(tempfile.mkdtemp(prefix="pam-test-"))
+    try:
+        genes_dir = tmp / "genes"
+        genes_dir.mkdir()
+        outdir = tmp / "out"
+
+        # ① 无基因库目录 → exit=3（环境不可用，非崩溃）
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(tmp / "nope")],
+                           capture_output=True, text=True)
+        assert r.returncode == 3, f"库不存在应 exit=3: {r.returncode}"
+        assert "Traceback" not in r.stderr, r.stderr[:300]
+
+        # ② 空目录 → exit=1（拒绝，不静默当空）
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir)],
+                           capture_output=True, text=True)
+        assert r.returncode == 1, f"空库应 exit=1: {r.returncode}"
+
+        # ③ 损坏 JSON → exit=1（不静默跳过损坏文件）
+        (genes_dir / "genes-broken.json").write_text('{"genes":[', encoding="utf-8")
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir)],
+                           capture_output=True, text=True)
+        assert r.returncode == 1, f"损坏库应 exit=1: {r.returncode}"
+        (genes_dir / "genes-broken.json").unlink()
+
+        # 装入一份合法但证据不齐的基因
+        (genes_dir / "genes-t.json").write_text(json.dumps({
+            "schema": "pgg-evolution/gene-bank/v1",
+            "genes": [{"type": "gap", "module": "K",
+                       "mechanism": "测试定义了但没注册到 main",
+                       "resolution": "补注册"}],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        # ④ 正常跑 → exit=0；证据不齐必须全部 WATCH（不得放行）
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir),
+                            "--outdir", str(outdir), "--json"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[:300] + r.stderr[:300]
+        rep = json.loads(r.stdout)
+        assert rep["input_counts"]["total_genes"] == 1, rep
+        assert rep["input_counts"]["auto_allowed"] == 0, "证据不齐不得放行"
+        assert all(v.startswith("WATCH") for v in rep["verdict_counts"]), rep["verdict_counts"]
+
+        # ⑤ 只读模式 → 写必拦 exit=1
+        env = {**os.environ, mod.READONLY_SWITCH: "1"}
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir),
+                            "--outdir", str(outdir)], capture_output=True, text=True, env=env)
+        assert r.returncode == 1, f"只读下必须 exit=1: {r.returncode}"
+        # 只读只拦写，不拦读：load_genes 直调应成功
+        n = len(mod.load_genes(genes_dir))
+        assert n == 1, f"只读下读动作应放行: {n}"
+
+        # ⑥ 高风险 lane：法律/凭据/内核 即使证据齐也必须人工
+        full = ["source_readback", "claim_extract", "test_output", "runtime_output",
+                "human_review", "secondary_llm_or_domain_audit"]
+        g_legal = {"mechanism": "法律办案门禁缺二次复核", "resolution": "加强制人工",
+                   "_gid": "aaa111bbb222", "_file": "x.json"}
+        g_cred = {"mechanism": "token 明文写配置", "resolution": "走凭据桥",
+                  "_gid": "ccc333ddd444", "_file": "x.json"}
+        g_kern = {"mechanism": "改模型底层权重", "resolution": "x",
+                  "_gid": "eee555fff666", "_file": "x.json"}
+        g_low = {"mechanism": "测试未注册", "resolution": "补注册",
+                 "_gid": "ggg777hhh888", "_file": "x.json"}
+        assert mod.risk_lane(g_legal) == "legal", "法律词必须进 legal lane"
+        assert mod.risk_lane(g_cred) == "credential", "凭据词必须进 credential lane"
+        assert mod.risk_lane(g_kern) == "high", "内核/权重词必须进 high lane"
+        assert mod.risk_lane(g_low) == "low_engineering", "纯工程才可低风险"
+        for g in (g_legal, g_cred, g_kern):
+            lane = mod.risk_lane(g)
+            v, miss = mod.verdict(g, lane, full)
+            assert v == "WATCH_REQUIRES_HUMAN_REVIEW", f"{lane} 证据齐也必须人工: {v}"
+            p = mod.make_packet(g, lane, full, v, miss, 1)
+            assert p["human_required"] is True and p["auto_allowed"] is False, p
+        # 低风险 + 证据齐 → 才可 eligible（且仍不做写入）
+        lane = mod.risk_lane(g_low)
+        v, miss = mod.verdict(g_low, lane, full)
+        assert v == "PASS_PROMOTION_ELIGIBLE_NO_DB_MUTATION", v
+        assert mod.make_packet(g_low, lane, full, v, miss, 1)["auto_allowed"] is True
+
+        # ⑦ 负参数 → 拒绝
+        r = subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir),
+                            "--limit-review", "-1"], capture_output=True, text=True)
+        assert r.returncode == 1, f"负数参数应拒绝: {r.returncode}"
+
+        # ⑧ 只读模式不得产生任何文件（防「声称只读却写了」）
+        before = {p for p in outdir.rglob("*")} if outdir.exists() else set()
+        subprocess.run([sys.executable, str(tool), "--genes-dir", str(genes_dir),
+                        "--outdir", str(outdir)], capture_output=True, text=True, env=env)
+        after = {p for p in outdir.rglob("*")} if outdir.exists() else set()
+        assert before == after, "只读模式下不得新增文件"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("✓ 晋升矩阵：只读拦写/fail-closed/高风险必人工/证据不齐全 WATCH")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -993,6 +1111,7 @@ def main() -> None:
     test_gene_match_warns_on_missing_l5()
     test_permission_doctor_gives_actionable_attribution()
     test_host_capture_probe_never_uses_hidden_filename()
+    test_promotion_authority_matrix_read_only_and_fail_closed()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
