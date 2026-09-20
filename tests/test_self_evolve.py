@@ -654,18 +654,34 @@ def test_coord_probe_distinguishes_env_from_bug() -> None:
     spec.loader.exec_module(mod)
 
     diag = mod.diagnose_service()
-    assert "service_loaded" in diag and "screen_capture_ok" in diag, diag
+    # 2026-09-20 修正：权限主体是 ai.kimi.cu（KimiCU.app），不是本脚本宿主。
+    # 旧断言用 screen_capture_ok（screencapture 探的是 node）——测错主体，已改为
+    # kimi_screenshot_ok（直接调 kimi-cu 截图，真判据）；宿主项降为参考。
+    assert "service_loaded" in diag and "kimi_screenshot_ok" in diag, diag
     assert isinstance(diag["service_loaded"], bool), diag
-    # screen_capture_ok 必须是三态（True/False/None），None 不得当成可用
-    assert diag["screen_capture_ok"] in (True, False, None), diag
+    # kimi_screenshot_ok 必须是三态（True/False/None），None 不得当成可用
+    assert diag["kimi_screenshot_ok"] in (True, False, None), diag
+    assert "host_screen_capture_ok" in diag, diag
 
-    # 探针在环境不满足时必须返回非零（不得报 PASS）
-    r = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True, timeout=90)
-    assert r.returncode != 0, f"环境不满足时探针不得报成功: rc={r.returncode}\n{r.stdout[:300]}"
-    assert "PASS" not in r.stdout or "不得报 PASS" in r.stdout, r.stdout[:300]
-    # 必须明确归因（服务/权限），不得只说「失败」
+    # 探针在环境不满足时必须返回非零（不得报 PASS）；环境满足时得 0 才算真过。
+    # 2026-09-20 修正：原断言硬编码「必须非零」，但环境修好后探针本就该 exit=0，
+    # 那条断言会反过来把正常状态判成失败。改为**按环境分支**判定：
+    #   服务未加载 / 截图不可用 → 必须非零（不得报成功）
+    #   两者都就绪            → 必须为 0，且必须给出端到端点击验证结论
+    r = subprocess.run([sys.executable, str(probe), "--app", "TextEdit"],
+                       capture_output=True, text=True, timeout=120)
+    env_ready = diag["service_loaded"] and diag["kimi_screenshot_ok"] is True
+    if not env_ready:
+        assert r.returncode != 0, f"环境不满足时探针不得报成功: rc={r.returncode}\n{r.stdout[:300]}"
+        assert "PASS" not in r.stdout or "不得报 PASS" in r.stdout, r.stdout[:300]
+    # 必须明确归因（服务/权限/点击），不得只说「失败」
     assert ("服务" in r.stdout or "权限" in r.stdout), r.stdout[:300]
-    print("✓ 坐标探针区分环境问题与代码 bug（服务未加载/无屏幕录制权限 分别归因）")
+    # 端到端点击验证结论必须出现（不得只凭「缩放比等比」就宣称坐标有效）
+    assert "点击验证" in r.stdout or "未验证" in r.stdout, r.stdout[:400]
+    # 硬规则：不得仅凭等比缩放就宣称坐标已实测有效
+    assert not ("等比缩放" in r.stdout and "坐标校正实测有效" in r.stdout
+                and "点击验证" not in r.stdout), "不得只凭缩放比宣称坐标有效"
+    print("✓ 坐标探针区分环境问题与代码 bug（服务/权限/点击三层归因，且不凭缩放比冒充有效）")
 
 
 def test_readonly_mode_blocks_writes() -> None:
