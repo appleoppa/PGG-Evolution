@@ -442,6 +442,50 @@ def test_evidence_exaggeration_and_downgrade() -> None:
     print("✓ evidence 夸大词拦截 + 工件失效自动降级")
 
 
+def test_gate_scans_untracked_files() -> None:
+    """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
+
+    原实现只把 `git diff HEAD` 当 diff_text，未跟踪（新增）文件内容不在其中，
+    导致 L3 diff 大小与 L4 密钥扫描双双漏检新文件。
+    实测：新增 1729 行代码时 L3 只报 56 行；新文件里的密钥不被 L4 发现。
+    """
+    import shutil
+    if not shutil.which("git"):
+        print("⊘ gate 未跟踪文件回归测试跳过（无 git）")
+        return
+    with tempfile.TemporaryDirectory() as repo:
+        repo_path = Path(repo)
+        def g(*a):
+            return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+        g("init", "-q")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        (repo_path / "tracked.txt").write_text("hello\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "init")
+        # 造一个大的未跟踪新文件（应被 L3 计入）
+        (repo_path / "new_big.py").write_text("\n".join(f"x{i} = {i}" for i in range(400)) + "\n",
+                                               encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("se_gate_ut", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        paths, diff_text = mod.gate_paths_from_git(Path(repo))
+        assert "new_big.py" in paths, f"未跟踪文件应在路径列表: {paths}"
+        assert "x399 = 399" in diff_text, "未跟踪文件内容必须进 diff_text（否则 L3/L4 漏检）"
+        r = mod.apply_gate(paths, diff_text, backup_dir=repo)
+        assert r["checks"]["L3_diff_size"]["diff_lines"] >= 400, \
+            f"未跟踪文件的 400 行必须被 L3 计入: {r['checks']['L3_diff_size']}"
+        assert r["allow_apply"] is False, "超限应 BLOCKED"
+        # 未跟踪文件里的密钥必须被 L4 扫到（夹具运行时拼串，源码不留字面密钥）
+        fake = "sk-" + "live-" + "abcdefghijklmnopqrstuvwxyz" + "123456"
+        (repo_path / "leak.py").write_text(f'API_KEY = "{fake}"\n', encoding="utf-8")
+        paths2, diff2 = mod.gate_paths_from_git(Path(repo))
+        r2 = mod.apply_gate(paths2, diff2, backup_dir=repo)
+        assert r2["checks"]["L4_secret_scan"]["ok"] is False, \
+            f"未跟踪文件里的密钥必须被 L4 拦截: {r2['checks']['L4_secret_scan']}"
+    print("✓ gate 覆盖未跟踪文件（L3 计入行数 / L4 扫到密钥，修复假阴性）")
+
+
 def main() -> None:
     test_health()
     test_health_deep()
@@ -475,6 +519,7 @@ def main() -> None:
     test_evidence_empty_file_and_single_run_rejected()
     test_evidence_state_derivation()
     test_evidence_exaggeration_and_downgrade()
+    test_gate_scans_untracked_files()
     test_feedback_record()
     test_feedback_invalid_outcome()
     test_feedback_stats()

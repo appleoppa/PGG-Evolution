@@ -891,18 +891,45 @@ def apply_gate(paths: list[str], diff_text: str = "", backup_dir: str | None = N
     }
 
 
-def gate_paths_from_git(repo: Path | None = None) -> tuple[list[str], str]:
-    """从 git 工作区取变更路径与 diff（只读），供 --gate 无参自检。"""
+def gate_paths_from_git(repo: Path | None = None,
+                        max_untracked_bytes: int = 2_000_000) -> tuple[list[str], str]:
+    """从 git 工作区取变更路径与 diff（只读），供 --gate 无参自检。
+
+    修复（假阴性漏洞）：此前只把 `git diff HEAD` 当 diff_text，但未跟踪文件（新增文件）
+    的内容不在 `git diff HEAD` 里——导致 L3 diff 大小与 L4 密钥扫描**双双漏检新文件**。
+    实测：新增 1729 行代码时 L3 只报 56 行，且新文件里的密钥不会被 L4 发现。
+    现把未跟踪文件内容按「全新增行」合成进 diff_text，使 L3/L4 真正覆盖新文件。
+    """
     import subprocess
     cwd = str(repo or PLUGIN_DIR.parent)
     try:
         d = subprocess.run(["git", "-C", cwd, "diff", "HEAD"], capture_output=True, text=True, timeout=30)
         names = subprocess.run(["git", "-C", cwd, "diff", "--name-only", "HEAD"], capture_output=True, text=True, timeout=30)
         untracked = subprocess.run(["git", "-C", cwd, "ls-files", "--others", "--exclude-standard"], capture_output=True, text=True, timeout=30)
-    except Exception as e:
-        return [], f""
+    except Exception:
+        return [], ""
     paths = [p for p in (names.stdout + untracked.stdout).splitlines() if p.strip()]
-    return paths, d.stdout
+    diff_text = d.stdout
+
+    # 把未跟踪文件内容并入 diff_text（全按新增行），否则 L3/L4 会漏掉新文件
+    repo_root = Path(cwd)
+    extra = []
+    for rel in [p for p in untracked.stdout.splitlines() if p.strip()]:
+        fp = repo_root / rel
+        try:
+            if not fp.is_file() or fp.stat().st_size > max_untracked_bytes:
+                # 超大/非文件：仍要在 diff 里留可审计痕迹，但不读内容
+                extra.append(f"--- /dev/null\n+++ b/{rel}\n+[未跟踪文件，超过 {max_untracked_bytes} 字节或非普通文件，未读入内容]")
+                continue
+            body = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            extra.append(f"--- /dev/null\n+++ b/{rel}\n+[未跟踪文件读取失败]")
+            continue
+        lines = body.splitlines()
+        extra.append(f"--- /dev/null\n+++ b/{rel}\n" + "\n".join("+" + ln for ln in lines))
+    if extra:
+        diff_text = diff_text + "\n" + "\n".join(extra)
+    return paths, diff_text
 
 
 def status_summary() -> dict:
