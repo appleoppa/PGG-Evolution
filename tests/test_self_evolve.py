@@ -507,6 +507,28 @@ def test_gene_match_warns_on_missing_l5() -> None:
     print("✓ 基因复用时缺 L5 必警告（不静默复用）")
 
 
+def test_permission_doctor_gives_actionable_attribution() -> None:
+    """行为：权限诊断必须区分「服务未加载」与「无屏幕录制权限」，并给出可执行指引。
+
+    背景：kimi-cu 坐标校正被 macOS TCC 挡住。两类症状相似但修法不同，
+    必须分开报，否则会把环境问题误报成代码 bug。
+    """
+    doc = Path(__file__).resolve().parent.parent / "scripts" / "kimi_permission_doctor.py"
+    assert doc.is_file(), f"诊断工具不存在: {doc}"
+    r = subprocess.run([sys.executable, str(doc)], capture_output=True, text=True, timeout=90)
+    out = r.stdout
+    # 必须报服务状态与权限状态两项
+    assert "服务" in out and "屏幕录制权限" in out, out[:400]
+    # 退出码必须落在契约内（0 就绪 / 2 服务未加载 / 3 无权限）
+    assert r.returncode in (0, 2, 3), f"退出码越界: {r.returncode}\n{out[:300]}"
+    # 不可用时必须给可执行指引，不得只说「失败」
+    if r.returncode != 0:
+        assert ("launchctl" in out or "系统设置" in out), f"缺可执行指引: {out[:400]}"
+    # 宿主链必须被回溯（用于告诉用户给哪个 app 授权）
+    assert "宿主链" in out or "权限就绪" in out, out[:400]
+    print("✓ 权限诊断：区分服务未加载/无屏幕录制权限，并给可执行授权指引")
+
+
 def test_gate_l3_feature_mode_requires_verifiable_entry() -> None:
     """行为：L3 feature 模式必须「可验证准入」，不得变成橡皮图章。
 
@@ -774,6 +796,7 @@ def main() -> None:
     test_evidence_exaggeration_and_downgrade()
     test_gene_l5_constraints_derived_not_faked()
     test_gene_match_warns_on_missing_l5()
+    test_permission_doctor_gives_actionable_attribution()
     test_gate_l3_feature_mode_requires_verifiable_entry()
     test_d07_claim_scanner_and_false_positive()
     test_coord_probe_distinguishes_env_from_bug()
