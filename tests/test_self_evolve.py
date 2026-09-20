@@ -1118,6 +1118,68 @@ def test_signal_taxonomy_match_is_auditable() -> None:
     print("✓ 信号归一：APEX 24 标准 + 本地扩展可区分，未映射不丢弃，匹配 overlap 可审计")
 
 
+def test_risk_tier_classification_is_conservative() -> None:
+    """D03 风险分级 R0-R4（吸收自成果包 03-实施手册 §2.2）。
+
+    手册原文优先级（不得被任何评分抬升）：
+      平台与法律硬约束 > 用户明确指令 > 数据治理/安全策略 > 任务策略/评分公式
+    原文明确：「任何全局公式、自动自治或模型自我评价均不得提高权限」。
+
+    核心不变式：
+      ① R2/R3/R4 一律 auto_allowed=False（与 diff 大小无关）
+      ② R4 必须双人复核
+      ③ 命中多项时就高不就低
+      ④ **未知变更保守落到 R2**（不得降级放行）
+      ⑤ 五个层级必须齐备且描述不外借
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_risk", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ⑤ 层级齐备
+    assert set(mod.RISK_TIERS) == {"R0", "R1", "R2", "R3", "R4"}, mod.RISK_TIERS.keys()
+
+    # ①/② 自动放行只能出现在 R0/R1
+    for tier, spec_ in mod.RISK_TIERS.items():
+        if tier in ("R2", "R3", "R4"):
+            assert spec_["auto_allowed"] is False, f"{tier} 不得自动放行"
+            assert spec_["needs_human"] is True, f"{tier} 必须人工"
+    assert mod.RISK_TIERS["R4"]["auto_allowed"] is False, "R4 原文：禁止自动执行"
+    assert "two_person_review" in mod.RISK_TIERS["R4"]["requires"], "R4 必须双人复核"
+
+    # 实际分级
+    cases = [
+        ("只读盘点资源盘文件", "R0", True),
+        ("改技能卡文档草案", "R1", True),
+        ("改自进化内核门禁实现", "R2", False),
+        ("生产环境策略切换", "R3", False),
+        ("更新凭据密钥", "R4", False),
+        ("写一个全新的自创场景没有任何关键词", "R2", False),  # ④ 保守
+    ]
+    for desc, expect_tier, expect_auto in cases:
+        r = mod.classify_risk_tier(desc)
+        assert r["tier"] == expect_tier, f"{desc!r} 应 {expect_tier}，实际 {r['tier']}"
+        assert r["auto_allowed"] is expect_auto, f"{desc!r} auto_allowed 应 {expect_auto}: {r}"
+
+    # ③ 就高不就低
+    mixed = mod.classify_risk_tier("只读盘点，顺便改生产策略和凭据")
+    assert mixed["tier"] == "R4", f"混合描述必须取最高层级: {mixed}"
+    assert mixed["matched_tiers"] == ["R0", "R3", "R4"], mixed["matched_tiers"]
+
+    # ④ 未知变更必须标保守默认（不得默认为 R0）
+    unknown = mod.classify_risk_tier("zzz 无关键词 zzz")
+    assert unknown["is_conservative_default"] is True, unknown
+    assert unknown["tier"] == "R2", "未知变更保守落 R2，不得放行到 R0"
+    assert unknown["auto_allowed"] is False, unknown
+
+    # 空输入不崩栈
+    assert mod.classify_risk_tier("")["tier"] == "R2", "空输入应保守"
+    assert mod.classify_risk_tier(None)["tier"] == "R2", "None 应保守"
+
+    print("✓ 风险分级：R0-R4 就高不就低，未知保守 R2，R2+ 一律人工")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1201,6 +1263,7 @@ def main() -> None:
     test_host_capture_probe_never_uses_hidden_filename()
     test_promotion_authority_matrix_read_only_and_fail_closed()
     test_signal_taxonomy_match_is_auditable()
+    test_risk_tier_classification_is_conservative()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
