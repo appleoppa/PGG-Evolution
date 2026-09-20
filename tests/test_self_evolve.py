@@ -392,7 +392,7 @@ def test_evidence_empty_file_and_single_run_rejected() -> None:
 
 def test_evidence_state_derivation() -> None:
     """行为测试：状态派生必须按证据链，且不得跳级。"""
-    with tempfile.TemporaryDirectory() as home:
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp:
         E = "scripts/self_evolve.py"
         # 只有 E2（代码存在）→ PARTIAL，绝不能是 VERIFIED
         run_in(["--evidence", "CLM-T4", "--level", "E2", "--artifact", E, "--note", "apply_gate"], home)
@@ -414,7 +414,9 @@ def test_evidence_state_derivation() -> None:
         assert c["allowed_state"] == "IMPLEMENTED_NOT_WIRED", f"E2/E3/E5 无 E7 应为 IMPLEMENTED_NOT_WIRED: {c}"
         assert "生产可用" in c["forbidden_wording"], f"必须禁用生产可用表述: {c}"
         # 跳级：只登记 E8 而无前置 → 不得升 VERIFIED
-        run_in(["--evidence", "CLM-T5", "--level", "E8", "--artifact", "/tmp/e8.json"], home)
+        e8 = Path(tmp) / "e8.json"
+        e8.write_text(json.dumps({"task": "t", "receipt": "r", "run": "r1", "repro": "r2"}), encoding="utf-8")
+        run_in(["--evidence", "CLM-T5", "--level", "E8", "--artifact", str(e8)], home)
         c = run_in(["--evidence-status", "CLM-T5"], home)["claims"][0]
         assert c["allowed_state"] != "VERIFIED", f"E8 缺前置不得跳级为 VERIFIED: {c}"
     print("✓ evidence 状态派生按链且不跳级（含未重跑命令保守降级）")
