@@ -1776,10 +1776,149 @@ def _load_gene_bank() -> list[dict]:
     return all_genes
 
 
+# ── APEX 标准信号词表（吸收自资源盘 1.Apex仓库/apex-spiral/apex-standard）──────
+# 来源：`APEX-GENE-STANDARD-EXT.md` §4.2「APEX Shannon Law 24 个核心信号」。
+# 该规范的核心主张：基因选择必须走**信号精确匹配**，而非模糊词频——
+#     selected_gene = argmax(gene ∈ candidate_pool) { signal_match_score }
+# 本库基因的 signals_match 历史上写成中文自然语言长句（如
+# 「准备修改记忆/配置/脚本/SOUL 类文件」），无法做精确信号匹配。
+# 本表把中文表述归一到 24 个标准信号键，使匹配可比较、可统计。
+# 诚实边界：中文关键词是**工程映射**，不是规范原文；映射不到的信号保留原样，
+# 不丢弃、不编造归属（见 normalize_signals 的 unmapped 返回）。
+SIGNAL_TAXONOMY: dict[str, list[str]] = {
+    "error": ["报错", "错误", "异常", "故障", "不可用", "告警"],
+    "exception": ["异常状态", "抛错", "traceback", "崩栈"],
+    "failed": ["失败", "未通过", "未生效", "失效", "未验证", "未注册", "未落地"],
+    "unstable": ["不稳定", "漂移", "抖动", "不一致"],
+    "validation": ["校验", "验证失败", "测试失败", "门禁拦截", "合规检查"],
+    "protocol": ["协议错误", "接口不符", "类型签名", "契约"],
+    "perf_bottleneck": ["性能瓶颈", "慢", "耗时", "卡顿"],
+    "resource_waste": ["资源浪费", "冗余", "重复消耗"],
+    "repeated_code": ["重复代码", "重复实现", "重复定义", "多套模板"],
+    "latency_high": ["高延迟", "延迟高", "超时"],
+    "capability_gap": ["能力缺口", "缺少", "尚未具备", "短板", "未接线"],
+    "stagnation": ["停滞", "无进展", "无增益"],
+    "new_requirement": ["新需求", "新功能", "新增工具", "新增参数"],
+    "unknown_domain": ["未知领域", "不熟悉", "首次接触"],
+    "survey": ["调研", "摸排", "盘点", "清点"],
+    "multi_component": ["多组件", "跨模块", "多子系统", "协同"],
+    "complex_workflow": ["复杂流程", "多阶段", "全流程", "闭环流程"],
+    "self_evolve": ["自进化", "自我进化", "自举", "进化闭环"],
+    "gene_heal": ["基因自愈", "基因库损坏", "基因失效"],
+    "root_cause": ["根因", "定位", "溯源", "诊断"],
+    "recurring_error": ["反复", "复发", "重复出现", "再次"],
+    "tool_bypass": ["绕过", "旁路", "跳过后禁", "规避"],
+    "hub_search_miss": ["检索未命中", "未命中", "搜不到", "知识库缺"],
+    "risk_high": ["高风险", "不可逆", "生产", "凭据", "密钥", "越权"],
+}
+
+# ── PGG 本地扩展信号（**非** APEX 原文）────────────────────────────────────
+# 本库有 34/53 条基因的 signals_match 描述的是 APEX 24 信号**盖不住**的场景，
+# 主要是「正本/记忆变更」「对外身份表述」「交付真实性」三类。
+# 诚实边界：以下是**本项目的工程扩展**，不是 APEX 规范原文；
+# 可扩充，但不得拿它冒充「符合 APEX 标准」。
+PGG_LOCAL_SIGNALS: dict[str, list[str]] = {
+    "canonical_write_intent": [
+        "正本", "记忆正本", "外置大脑", "SOUL", "人格设定",
+        "PGG-WIKI", "staging", "promotion", "自修改", "宿主侧文件",
+        "其他 agent 读取", "追加内容", "修改记忆", "修改配置", "修改脚本",
+    ],
+    "external_claim": [
+        "对外", "身份表述", "资质", "能力边界", "公开日志", "第三方",
+    ],
+    "delivery_authenticity": [
+        "冒充", "声称", "宣称", "文档冒充", "清单与现状不符", "未落地",
+    ],
+    "host_migration": [
+        "跨宿主", "迁移", "常驻服务", "上线", "重装", "升级后",
+        "bundle", "版本号变化", "模型数据源",
+    ],
+    "service_outage": [
+        "0%", "全面瘫痪", "不可用", "未迁移", "部分能力",
+    ],
+    "periodic_review": [
+        "周期性", "自省窗口", "待处理事项", "排优先级", "系统整体状态",
+        "AGI 演进", "阶段性质疑",
+    ],
+    "constitution_ambiguity": [
+        "目标定义模糊", "无法判定完成", "扫描器", "门禁", "判噪",
+        "接口清单", "参数声明", "无执行路径", "待改进",
+    ],
+    "verbosity_noise": [
+        "监控输出", "噪声", "告警与实际状态不符",
+    ],
+    "doc_code_drift": [
+        "文档/help", "承诺", "README", "端到端跑通", "参数但代码无实现",
+        "接口清单与实际行为不符",
+    ],
+    "reproducible_delivery": [
+        "可复现", "评测闭环", "可追溯", "交付证据", "提交前检查",
+        "验证能力闭环", "自举", "作用于自身",
+    ],
+    "code_duplication": [
+        "互不兼容", "同类模板", "分散在多个",
+    ],
+    "completion_claim": [
+        "功能开发完成", "测试与类型检查已通过", "待改进", "无对应代码",
+    ],
+}
+
+
+def _all_signal_tables() -> dict[str, list[str]]:
+    """APEX 24 标准信号 + PGG 本地扩展，保持可区分（本地项以 pgg_ 前缀标记）。"""
+    merged = dict(SIGNAL_TAXONOMY)
+    for k, v in PGG_LOCAL_SIGNALS.items():
+        merged[f"pgg_{k}"] = v
+    return merged
+
+
+# 信号权重：精确信号命中比自由词命中更能说明「该基因适配此任务」
+SIGNAL_MATCH_WEIGHT = 5
+
+
+def normalize_signals(raw) -> tuple[set[str], list[str]]:
+    """把基因的 signals_match 归一到标准信号键。
+
+    返回 (标准键集合, 未映射的原始信号列表)。
+    未映射项**原样保留**在第二项里，不丢弃、不强加归属——
+    否则会把「没归类」冒充成「已归类」，正是本项目要防的假完成。
+    """
+    if isinstance(raw, str):
+        raw = [raw]
+    table = _all_signal_tables()
+    hits: set[str] = set()
+    unmapped: list[str] = []
+    for item in (raw or []):
+        s = str(item or "").strip()
+        if not s:
+            continue
+        matched = False
+        low = s.lower()
+        for key, kws in table.items():
+            if any(
+                (kw in s) if re.search(r"[\u4e00-\u9fff]", kw)
+                else (kw in low)
+                for kw in kws
+            ):
+                hits.add(key)
+                matched = True
+        if not matched:
+            unmapped.append(s)
+    return hits, unmapped
+
+
+def classify_task_signals(task_desc: str) -> set[str]:
+    """从任务描述里提取标准信号（用于对齐基因的 signals_match）。"""
+    hits, _ = normalize_signals([task_desc])
+    return hits
+
+
 def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False) -> dict:
     """基因匹配复用（D12 元学习闭环）：新任务描述匹配历史基因。
 
-    简单关键词/维度名匹配（signals_match + mechanism + id），返回 top 可复用基因。
+    匹配 = 自由词频 + **标准信号精确命中加权**（权重 SIGNAL_MATCH_WEIGHT）。
+    后者吸收自资源盘 APEX 基因标准：`selected_gene = argmax(signal_match_score)`，
+    即信号匹配应是主判据，而非字符包含数量。
     默认排除已淘汰基因（Φ 反馈淘汰的运行时过滤）。
     """
     genes = _load_gene_bank()
@@ -1789,6 +1928,7 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
         genes = [g for g in genes if not g.get("_deprecated")]
         if not genes:
             return {"status": "OK", "task": task_desc, "matched": 0, "genes": [], "note": "可用基因全被淘汰，可新建闭环或 --include-deprecated 查看历史"}
+    task_signals = classify_task_signals(task_desc)
     scored = []
     for g in genes:
         score = 0
@@ -1803,6 +1943,12 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
         for w in words:
             if w in haystack:
                 score += 1
+        # 标准信号精确命中加权：这是 APEX 规范指定的主判据
+        gene_signals, _unmapped = normalize_signals(g.get("signals_match"))
+        overlap = task_signals & gene_signals
+        if overlap:
+            score += SIGNAL_MATCH_WEIGHT * len(overlap)
+            g = {**g, "_signal_overlap": sorted(overlap)}
         scored.append((score, g))
     scored.sort(key=lambda x: -x[0])
     top = [g for s, g in scored if s > 0][:top_n]
@@ -1815,6 +1961,10 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
         v = derive_gene_validation(g)
         row = {**{k: g[k] for k in ("category", "mechanism", "signals_match", "strategy", "_source") if k in g},
                "id": _gene_key(g)}
+        # 标准信号交集（APEX 规范指定的主判据）：必须随结果回传，
+        # 否则调用方无法区分「信号命中」与「仅词频命中」——匹配质量不可审计。
+        if g.get("_signal_overlap"):
+            row["_signal_overlap"] = g["_signal_overlap"]
         # L5 约束层：缺显式约束/验证时必须显式警告，不得静默复用
         if not c["explicit"] or not v["explicit"]:
             warned += 1
