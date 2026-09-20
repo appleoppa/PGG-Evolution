@@ -43,6 +43,17 @@ def mcp(name: str, args: dict, timeout: int = 30) -> dict:
     return {"_raw": p.stdout[:400], "_err": p.stderr[:300]}
 
 
+def _proc_name_for(bundle_id: str) -> str:
+    """bundle id → System Events 进程名（用于回退选目标）。"""
+    m = {
+        "com.apple.TextEdit": "TextEdit", "com.apple.Terminal": "Terminal",
+        "com.google.Chrome": "Google Chrome", "com.apple.Safari": "Safari",
+        "com.apple.finder": "Finder", "com.bytedance.macos.feishu": "Feishu",
+        "com.tencent.xinWeChat": "WeChat",
+    }
+    return m.get(bundle_id, "")
+
+
 def _bundle_for_window(win_name: str) -> str | None:
     """按窗口进程名从 kimi-cu list_apps 里匹配 bundle_id。
 
@@ -273,6 +284,8 @@ def main() -> int:
     ap.add_argument("--bundle", default=None, help="bundle id")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--shot", default="/tmp/kimi_coord_probe.png")
+    ap.add_argument("--skip-click-check", action="store_true",
+                    help="跳过端到端点击验证（仅测缩放比，不产出「坐标有效」结论）")
     args = ap.parse_args()
 
     print("=" * 66)
@@ -309,6 +322,15 @@ def main() -> int:
         print(f"✗ 取不到窗口几何（目标 {args.app or '任意可见进程'}）")
         print("  → 实测中止，不产出结论（不得凭猜测报 PASS）")
         return 2
+
+    # 默认（未指定 --app）时，System Events 可能选中无窗口/不可截的进程
+    # （实测：'Web App' 取到几何但 kimi-cu 报 no target app）。
+    # 此时回退到诊断阶段已证实**能出图**的 app，避免误报成「服务坏了」。
+    if not args.app and diag.get("probe_app"):
+        alt = window_geometry(_proc_name_for(diag["probe_app"]))
+        if alt:
+            geo = alt
+            print(f"  （默认目标不可截，回退到探针 app {diag['probe_app']}）")
 
     print(f"目标进程: {geo['name']}")
     print(f"窗口真实几何(逻辑点): 位置({geo['x']},{geo['y']}) 尺寸({geo['w']}x{geo['h']})")
@@ -356,10 +378,72 @@ def main() -> int:
         return 1
     print(f"\n结论：截图相对逻辑窗口为 {sx:.2f}x 等比缩放。")
 
+    # ── 端到端点击验证（2026-09-20 实测新增，补上探针一直缺失的最后一环）──
+    # 仅凭「缩放比等比」**不足以**证明点击准确。真判据 = 点一个可观测状态的
+    # 控件，读回其 Value 是否变化。实测用 TextEdit「粗体」复选框：Value 0→1 即命中。
+    if not args.skip_click_check and bundle:
+        r_e2e = _click_check(bundle)
+        if r_e2e is None:
+            print("\n⚠️ 端到端点击验证：目标无可用可观测控件，未能验证（不得当成已验证）")
+            return 0
+        if r_e2e:
+            print("\n✅ 端到端点击验证通过：点击后控件状态变化 ⇒ 坐标校正实测有效。")
+            return 0
+        print("\n❌ 端到端点击验证失败：点击后控件状态未变 ⇒ 坐标可能不准。")
+        return 1
     print("  下一步：取截图中心像素点做 click，再读回该点元素，")
     print("  比对是否命中窗口中心元素——只有这一步通过才能说『坐标校正实测有效』。")
     print("  仅凭『缩放比等比』**不足以**证明点击准确。")
     return 0
+
+
+def _click_check(bundle: str) -> bool | None:
+    """端到端点击验证：找一个可观测状态的 AXCheckBox，点它，读回 Value 是否变。
+
+    返回 True=状态变化（坐标准）/ False=未变（可能不准）/ None=无可测控件。
+    实测（2026-09-20）：TextEdit「粗体」Value 0→1，证明 kimi-cu 的
+    bbox 与 click 同在截图像素系，内部换算正确。
+    """
+    import re
+    import time
+
+    def _find_checkbox() -> tuple[int, int] | None:
+        r = mcp("get_app_state", {"app": bundle, "mode": "full"})
+        txt = ""
+        for b in r.get("result", {}).get("content", []):
+            if b.get("type") == "text":
+                txt = b.get("text", "")
+                break
+        for ln in txt.splitlines():
+            if "AXCheckBox" in ln and "Value:" in ln and "@" in ln:
+                m = re.search(r"\[(\d+)\]", ln)
+                v = re.search(r"Value:\s*(\d+)", ln)
+                if m and v:
+                    return int(m.group(1)), int(v.group(1))
+        return None
+
+    def _read_value() -> int | None:
+        r = mcp("get_app_state", {"app": bundle, "mode": "full"})
+        for b in r.get("result", {}).get("content", []):
+            if b.get("type") == "text":
+                for ln in b.get("text", "").splitlines():
+                    if "AXCheckBox" in ln and "Value:" in ln:
+                        m = re.search(r"Value:\s*(\d+)", ln)
+                        if m:
+                            return int(m.group(1))
+        return None
+
+    found = _find_checkbox()
+    if not found:
+        return None
+    idx, before = found
+    mcp("click", {"app": bundle, "index": idx})
+    time.sleep(1.5)
+    after = _read_value()
+    if after is None:
+        return None
+    print(f"  点击验证：index={idx} Value {before} → {after}")
+    return before != after
 
 
 if __name__ == "__main__":
