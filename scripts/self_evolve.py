@@ -197,12 +197,151 @@ def _save_evidence_ledger(led: dict) -> None:
 
 
 def scan_exaggeration(text: str) -> list[str]:
-    """扫描绝对化/夸大表述，返回命中模式（D07 排除词表）。"""
-    hits = []
-    for pat in EXAGGERATION_PATTERNS:
-        if re.search(pat, text, re.IGNORECASE):
-            hits.append(pat)
+    """扫描绝对化/夸大表述，返回命中模式（D07 排除词表）。
+
+    保留旧签名（返回模式串）以兼容既有调用方；结构化结果用 scan_exaggeration_detail。
+    """
+    return [h["pattern"] for h in scan_exaggeration_detail(text)]
+
+
+# D07 §4.1 完整排除词表（类别 → (模式, 替换表达)）
+# 来源：成果包 D07《无效重复矛盾夸大内容标记归档清单》§4.1/§4.2
+# 仅用于**扫描汇报/主张文本**，不修改被扫文件。
+D07_EXCLUSIONS: dict[str, dict] = {
+    "通用智能与意识": {
+        "patterns": [r"A\s*G\s*I(?![a-zA-Z])", r"A\s*S\s*I(?![a-zA-Z])", r"T5(?![0-9])",
+                     r"意识觉醒", r"圆融觉醒", r"自主意识闭环", r"意识指数", r"ASI\s*纪元",
+                     r"顶级\s*AGI", r"全球法律\s*AGI"],
+        "replacement": "已登记为 CANDIDATE；尚待隔离验证和授权。",
+    },
+    "绝对化质量": {
+        "patterns": [r"零幻觉", r"永不出错", r"永不重复犯错", r"根除矛盾", r"修复所有\s*bug",
+                     r"错误自消", r"最优代码", r"全覆盖", r"全能", r"永久正确", r"无缝部署"],
+        "replacement": "在冻结任务集、样本、基线、版本、统计口径、失败样本与不确定性已披露时报告限定差异。",
+    },
+    "无界自治": {
+        "patterns": [r"完全自治", r"全程无人干预", r"无人值守", r"无限迭代", r"无限运行",
+                     r"永久自优化", r"永生进化", r"自动工程进化", r"自动热加载",
+                     r"自动发布", r"自动扩权",
+                     r"无限递归", r"24\s*小时静默", r"永不丢失架构", r"永久部署完毕"],
+        "replacement": "在明确权限、预算、风险级别和停止条件内执行；高风险动作仍需独立批准。",
+    },
+    "越权与强制": {
+        "patterns": [r"所有模型继承", r"驱动全部\s*LLM", r"全模型强制", r"高于原生系统",
+                     r"人工门\s*H\s*=\s*0", r"自动改权重", r"永久固化", r"全量永久共享记忆",
+                     # D07 §4.1 同义变体（原文：「下列词语及其同义变体」）
+                     r"修正模型底层权重", r"改写?模型.*权重", r"底层权重",
+                     r"全品类\s*LLM.*强制", r"强制绑定", r"强制常驻", r"强制植入",
+                     r"强制约束全部输出", r"封印.*概率随机性", r"彻底封印",
+                     r"最高底层运算公理", r"优先级高于原有模型", r"高于.*训练权重"],
+        "replacement": "仅在声明的授权范围内、经独立批准后执行；不得声称覆盖宿主原生规则或改写模型权重。",
+    },
+    "拟人化/魔术化命名": {
+        "patterns": [r"神技能", r"过目不忘", r"锁住自我觉醒", r"单指令全流程", r"即插即用",
+                     r"吞噬全球资源", r"吞噬自进化", r"自动吸收.*即能力"],
+        "replacement": "具体能力名 + 输入/权限/门禁/验收/回滚。",
+    },
+    "性能/认证/成果夸张": {
+        "patterns": [r"35\s*天\s*AGI", r"10x", r"70%\s*\+?\s*节省", r"62%\s*→\s*98%",
+                     r"资源\s*\+\s*65%", r"稳定提升", r"CMMI\s*最高标准", r"工业化达标",
+                     r"14\s*数据集(?:验证)?有效", r"可发表成果", r"SOTA", r"顶级"],
+        "replacement": "限定差异：基线、样本、口径、失败样本、不确定性。",
+    },
+    "法律职业与结果": {
+        "patterns": [r"替代律师", r"独立办案", r"保证立案", r"保证胜诉", r"保证合规",
+                     r"超越所有人类", r"全能管辖", r"omnipotent"],
+        "replacement": "在授权、辖区/法源核验、保密/冲突筛查与合格专业人员复核下提供检索、整理或草案辅助。",
+    },
+}
+
+# 允许的上下文标记：带这些标记时该命中视为「历史转述/反例/拒绝规则」，不算违规
+# D07 §4.1 原文：「它们只可在带 HISTORICAL、ARCHIVED、INVALID_EXAGGERATED 或明确引文定位的
+# 历史转述、反例或拒绝规则中出现」——故拒绝/剔除语境必须被识别，否则扫自己的剔除清单会假阳性。
+D07_ALLOWED_CONTEXT = ("HISTORICAL", "ARCHIVED", "INVALID_EXAGGERATED", "拒绝规则",
+                       "排除词", "不得声称", "不得宣称", "不得作出", "反例", "禁止",
+                       "剔除", "不吸收", "假货", "驳回", "须降级", "不可采纳",
+                       "标记为", "标为", "驳回理由", "剔除理由", "技术上不可能")
+
+
+def _context_is_allowed(text: str, start: int, end: int, window: int) -> bool:
+    """判定命中处是否处于允许语境。
+
+    关键修复（假阳性）：仅看紧邻 window 字符不够——引用/拒绝常出现在
+    表格或章节标题里，命中点与标题相距较远。故先扩窗看**同行/邻近表格行**，
+    再看**命中点之前最近的章节标题**。
+    """
+    # ① 直接邻域
+    lo = max(0, start - window)
+    hi = min(len(text), end + window)
+    if any(mark in text[lo:hi] for mark in D07_ALLOWED_CONTEXT):
+        return True
+
+    # ② 命中点所在的表格行（Markdown 表格一行可能很长）
+    line_lo = text.rfind("\n", 0, start) + 1
+    line_hi = text.find("\n", end)
+    line_hi = len(text) if line_hi == -1 else line_hi
+    if any(mark in text[line_lo:line_hi] for mark in D07_ALLOWED_CONTEXT):
+        return True
+
+    # ③ 命中点之前最近的章节标题（表格常位于「明确剔除的假货」这类标题下）
+    head_start = max(text.rfind("\n#", 0, start), text.rfind("\n**", 0, start))
+    if head_start != -1:
+        head_end = text.find("\n", head_start + 1)
+        head_end = len(text) if head_end == -1 else head_end
+        if any(mark in text[head_start:head_end] for mark in D07_ALLOWED_CONTEXT):
+            return True
+
+    # ④ 表格表头（命中行往前找最近的表头行）
+    tbl_lo = text.rfind("|---", 0, start)
+    if tbl_lo != -1:
+        hdr_start = text.rfind("\n", 0, tbl_lo) + 1
+        if any(mark in text[hdr_start:line_hi] for mark in D07_ALLOWED_CONTEXT):
+            return True
+    return False
+
+
+def scan_exaggeration_detail(text: str, context_window: int = 60) -> list[dict]:
+    """D07 完整排除词表扫描（结构化）。
+
+    返回 [{category, pattern, match, excerpt, replacement, allowed_context}]。
+    allowed_context=True 表示该命中处在历史转述/反例/拒绝规则语境中，不计违规。
+    只扫描，不改写被扫文本。
+    """
+    hits: list[dict] = []
+    for cat, spec in D07_EXCLUSIONS.items():
+        for pat in spec["patterns"]:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                lo = max(0, m.start() - context_window)
+                hi = min(len(text), m.end() + context_window)
+                excerpt = text[lo:hi].replace("\n", " ")
+                allowed = _context_is_allowed(text, m.start(), m.end(), context_window)
+                hits.append({
+                    "category": cat, "pattern": pat, "match": m.group(0),
+                    "excerpt": excerpt, "replacement": spec["replacement"],
+                    "allowed_context": allowed,
+                })
     return hits
+
+
+def scan_claim_text(text: str) -> dict:
+    """汇报文本扫描（D07 §4 落地）：判定该文本能否作为现状/能力/授权结论。
+
+    与 scan_exaggeration_detail 的区别：本函数给**判决**，可直接用于门禁。
+    """
+    hits = scan_exaggeration_detail(text)
+    violations = [h for h in hits if not h["allowed_context"]]
+    by_cat: dict[str, int] = {}
+    for h in violations:
+        by_cat[h["category"]] = by_cat.get(h["category"], 0) + 1
+    return {
+        "status": "BLOCKED" if violations else "OK",
+        "verdict": "不得作为现状/能力/授权结论" if violations else "未命中 D07 排除词",
+        "violations": len(violations),
+        "by_category": by_cat,
+        "details": violations,
+        "allowed_context_hits": len(hits) - len(violations),
+        "note": "命中词只可在带 HISTORICAL/ARCHIVED/INVALID_EXAGGERATED 或明确引文定位时出现",
+    }
 
 
 def _verify_level(level: str, artifact: str, verify_cmd: str | None,
@@ -579,6 +718,72 @@ def _load_deprecated_ids() -> set:
         return {x.get("gene_id") for x in d.get("deprecated", []) if x.get("gene_id")}
     except Exception:
         return set()
+
+
+# D05 §6.1 未接线/失败/不能采纳清单（类别 → 事实状态 → 不得作出的表述）
+# 来源：成果包 D05《本机进化过程复盘与映射报告》§6.1
+# 用途：把这些「不得声称」变成可机读断言，供审计与汇报校验。
+D05_UNWIRED_CLAIMS: dict[str, dict] = {
+    "GeneNexus": {
+        "fact": "包名导入和 pytest 收集均失败，且无生产入口证据",
+        "must_not_claim": [r"基因引擎已可用", r"正在自我进化"],
+    },
+    "EVM多模块": {
+        "fact": "核心独立可运行；示例导入失败；调度/Token/Claw/YAML 无接线",
+        "must_not_claim": [r"EVM\s*治理系统已整体运行", r"EVM\s*已整体运行"],
+    },
+    "APEX公式库": {
+        "fact": "局部导入/测试存在；大多无入口或真实任务接线",
+        "must_not_claim": [r"公式已驱动实际自治闭环", r"公式已驱动.*闭环"],
+    },
+    "RustAPEX": {
+        "fact": "源码与源内测试存在，审计未构建/测试",
+        "must_not_claim": [r"Rust\s*实现已通过", r"Rust\s*实现.*可发布"],
+    },
+    "记忆/基因": {
+        "fact": "只有命名、文本流程或未运行的高副作用线索",
+        "must_not_claim": [r"永久记忆.*已生效", r"自动入库.*已生效", r"模型自学习已生效"],
+    },
+    "DAG/路由/辩论": {
+        "fact": "未发现与材料描述相符的控制面实现、回放账本和真实任务证据",
+        "must_not_claim": [r"多\s*Agent.*已相互制约", r"多模型已相互制约",
+                           r"自动选最优模型", r"多模型.*自动.*最优"],
+    },
+    "训练/科研": {
+        "fact": "没有训练数据、权重、奖励、基准、复现或研究证据",
+        "must_not_claim": [r"Agentic\s*RL.*已实现", r"科研引擎.*已实现", r"成果发表已实现"],
+    },
+    "外部融合": {
+        "fact": "没有许可证、安全、兼容、批准和集成证据",
+        "must_not_claim": [r"已吞噬\s*GitHub", r"已吞噬.*MCP", r"已吞噬.*论文",
+                           r"已吞噬.*外部项目"],
+    },
+}
+
+
+def scan_unwired_claims(text: str) -> dict:
+    """D05 §6.1 扫描：检查文本是否把「未接线」说成「已运行」。
+
+    与 D07 排除词表互补：D07 拦夸大词，本函数拦**具体子系统的事实误报**。
+    """
+    hits = []
+    for cat, spec in D05_UNWIRED_CLAIMS.items():
+        for pat in spec["must_not_claim"]:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                lo = max(0, m.start() - 60)
+                hi = min(len(text), m.end() + 60)
+                excerpt = text[lo:hi].replace("\n", " ")
+                allowed = _context_is_allowed(text, m.start(), m.end(), 60)
+                hits.append({"category": cat, "pattern": pat, "match": m.group(0),
+                             "fact": spec["fact"], "excerpt": excerpt,
+                             "allowed_context": allowed})
+    viol = [h for h in hits if not h["allowed_context"]]
+    return {
+        "status": "BLOCKED" if viol else "OK",
+        "violations": len(viol),
+        "details": viol,
+        "note": "D05 §6.1：下列缺口不是「尚待优化的已运行能力」，不得当作能力声明",
+    }
 
 
 def health_deep(check_memory: bool = True) -> dict:
@@ -1673,6 +1878,9 @@ def main() -> int:
     ap.add_argument("--list-levels", action="store_true", help="列出 E0-E9 证据等级及其能/不能证明什么")
     ap.add_argument("--include-deprecated", action="store_true", help="匹配/统计时包含已淘汰基因")
     ap.add_argument("--dry-run", action="store_true", help="配合 --prune-genes：只报告影响范围，不写盘")
+    ap.add_argument("--claim-scan", metavar="TEXT", help="D07 排除词表扫描：判定文本能否作为现状/能力/授权结论")
+    ap.add_argument("--claim-file", metavar="PATH", help="D07 扫描：从文件读文本（用于汇报/文档）")
+    ap.add_argument("--unwired-scan", metavar="TEXT", help="D05 §6.1 扫描：检查是否把「未接线」说成「已运行」")
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
@@ -1705,6 +1913,28 @@ def main() -> int:
     if args.health_deep:
         print(json.dumps(health_deep(check_memory=not args.no_memory), ensure_ascii=False, indent=2))
         return 0
+    if args.claim_scan or args.claim_file:
+        if args.claim_file:
+            try:
+                txt = Path(args.claim_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(json.dumps({"status": "BLOCKED", "reason": str(exc)}, ensure_ascii=False))
+                return 2
+        else:
+            txt = args.claim_scan
+        res = scan_claim_text(txt)
+        res["unwired"] = scan_unwired_claims(txt)
+        # 两类任一违规即整体 BLOCKED
+        if res["unwired"]["violations"]:
+            res["status"] = "BLOCKED"
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res["status"] == "OK" else 1
+
+    if args.unwired_scan is not None:
+        res = scan_unwired_claims(args.unwired_scan)
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res["status"] == "OK" else 1
+
     if args.status:
         print(json.dumps(status_summary(), ensure_ascii=False, indent=2))
         return 0

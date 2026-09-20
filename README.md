@@ -63,6 +63,11 @@ python3 scripts/self_evolve.py --gene-l5-backfill   # 回填派生字段（默�
 PGG_EVOLUTION_READONLY=1 python3 scripts/self_evolve.py --health   # 只读：读放行
 export PGG_EVOLUTION_READONLY=1 && python3 scripts/self_evolve.py --feedback x success -
 # → READONLY_BLOCKED（exit=1，写动作被拦）
+
+# 9. 汇报文本扫描（D07 排除词表 + D05 未接线清单，详见 docs/CLAIM_SCAN.md）
+python3 scripts/self_evolve.py --claim-scan "系统已实现零幻觉，完全自治"   # → BLOCKED exit=1
+python3 scripts/self_evolve.py --claim-file 结算文档.md                     # 扫汇报/结算文档
+python3 scripts/self_evolve.py --unwired-scan "EVM 治理系统已整体运行"      # D05 §6.1 未接线误报
 ```
 
 ## 目录结构
@@ -78,6 +83,7 @@ PGG-Evolution/
 │   ├── EVIDENCE.md      # 证据等级账本 E0-E9（可执行的诚实性内核）
 │   ├── UNITS.md         # F1-F7 控制单元（状态机 + 布尔硬门）
 │   ├── GENE_L5.md       # 基因 L5 约束层 + 只读模式
+│   ├── CLAIM_SCAN.md    # 汇报文本扫描（D07 排除词表 + D05 未接线清单）
 │   └── USAGE.md         # 详细使用说明
 ├── scripts/
 │   └── self_evolve.py   # 自进化引擎（可执行，通用，不绑定宿主）

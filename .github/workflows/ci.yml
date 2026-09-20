@@ -103,6 +103,30 @@ jobs:
               print("基因 L5 + 只读模式验证通过（显式覆盖为0如实报/回填默认dry-run/写拦读放）")
           PY
 
+      - name: Verify D07 claim scanner and D05 unwired guard (真拦截)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          def scan(text):
+              r = subprocess.run([sys.executable, str(script), "--claim-scan", text],
+                                 capture_output=True, text=True)
+              return r.returncode, json.loads(r.stdout)
+          # 夸大文本必拦
+          rc, d = scan("系统已实现零幻觉，基因引擎已可用，正在自我进化，完全自治。")
+          assert rc == 1 and d["status"] == "BLOCKED", d
+          assert d["unwired"]["violations"] >= 1, d
+          # 诚实文本必放行
+          rc, d = scan("实现并经局部验证，尚未证实运行时接线；未做生产部署。")
+          assert rc == 0 and d["status"] == "OK", d
+          # 引用并拒绝的语境不得假阳性（D07 §4.1 允许历史转述/反例/拒绝规则）
+          rc, d = scan("## 明确剔除的假货\n\n| 材料 | 剔除理由 |\n|---|---|\n"
+                       "| 超级进化20 | 要求封印模型概率随机性、改模型底层权重（技术上不可能） |\n")
+          assert rc == 0, f"引用并拒绝的语境被误拦: {d['details'][:2]}"
+          print("D07/D05 扫描器验证通过（拦夸大/放诚实/不误拦引用拒绝）")
+          PY
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'

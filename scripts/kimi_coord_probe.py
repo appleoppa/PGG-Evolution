@@ -90,6 +90,40 @@ def png_size(path: str) -> tuple[int, int] | None:
         return None
 
 
+def diagnose_service() -> dict:
+    """诊断 kimi-cu 服务与权限状态（区分「服务未加载」与「无屏幕录制权限」）。
+
+    2026-09-20 实测根因：MCP 进程在，但 LaunchAgent `ai.kimi.cu.service` 未加载
+    → 调用返回 "service unavailable: perform failed after retries"。
+    修复：launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/ai.kimi.cu.service.plist
+
+    另一层：即使服务在，若宿主进程无屏幕录制权限，get_app_state(image) 返回空 content。
+    二者症状不同，必须分开报，否则会误判成代码 bug。
+    """
+    out = {"service_loaded": False, "service_pid": None, "screen_capture_ok": None}
+    try:
+        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=10)
+        for ln in r.stdout.splitlines():
+            if "ai.kimi.cu.service" in ln:
+                parts = ln.split()
+                out["service_loaded"] = True
+                out["service_pid"] = None if parts[0] == "-" else parts[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # 系统级截图对照：能区分「本进程无权限」与「kimi-cu 自身问题」
+    try:
+        probe = "/tmp/kimi_coord_screencapture_probe.png"
+        r = subprocess.run(["screencapture", "-x", probe], capture_output=True, text=True, timeout=15)
+        import os as _os
+        ok = r.returncode == 0 and _os.path.exists(probe)
+        out["screen_capture_ok"] = ok
+        if _os.path.exists(probe):
+            _os.remove(probe)
+    except (OSError, subprocess.SubprocessError):
+        out["screen_capture_ok"] = False
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", default=None, help="目标应用进程名（默认取第一个有窗口的可见进程）")
@@ -101,6 +135,24 @@ def main() -> int:
     print("=" * 66)
     print("kimi-cu 坐标校正实测探针")
     print("=" * 66)
+
+    # 先诊断服务与权限——避免把环境问题误报成代码 bug
+    diag = diagnose_service()
+    svc = "✅ 已加载" + (f" (pid {diag['service_pid']})" if diag["service_pid"] else " (未运行)") \
+        if diag["service_loaded"] else "❌ 未加载"
+    cap = {True: "✅ 可用", False: "❌ 不可用（无屏幕录制权限）", None: "? 未测"}[diag["screen_capture_ok"]]
+    print(f"服务 ai.kimi.cu.service: {svc}")
+    print(f"宿主屏幕录制权限: {cap}")
+    if not diag["service_loaded"]:
+        print("\n→ 修复：launchctl bootstrap gui/$(id -u) "
+              "~/Library/LaunchAgents/ai.kimi.cu.service.plist")
+        print("  该服务是 MachServices(XPC)，MCP 进程在但服务未加载时调用必失败。")
+    if diag["screen_capture_ok"] is False:
+        print("\n→ 宿主机未授予屏幕录制权限（系统 screencapture 亦失败）。")
+        print("  这是 macOS TCC 权限，不是 kimi-cu 或本脚本的 bug。")
+        print("  需人工在「系统设置 → 隐私与安全性 → 屏幕录制」授权运行本脚本的宿主。")
+        print("  → 实测中止，不得报 PASS。")
+        return 4
 
     geo = window_geometry(args.app)
     if not geo:
@@ -130,7 +182,7 @@ def main() -> int:
             open(args.shot, "wb").write(base64.b64decode(item["data"]))
             saved = True
     if not saved:
-        print("✗ 未返回图像内容")
+        print("✗ 未返回图像内容（服务在但无图像——通常是屏幕录制权限）")
         return 3
 
     size = png_size(args.shot)

@@ -507,6 +507,81 @@ def test_gene_match_warns_on_missing_l5() -> None:
     print("✓ 基因复用时缺 L5 必警告（不静默复用）")
 
 
+def test_d07_claim_scanner_and_false_positive() -> None:
+    """行为：D07 排除词扫描器必须拦夸大、放行诚实、不误拦「引用并拒绝」语境。
+
+    假阳性修复背景：扫自己的「明确剔除的假货」清单时，引用被拒说法会命中词表。
+    D07 §4.1 原文明确允许「历史转述、反例或拒绝规则」——故必须识别拒绝语境。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_d07", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ① 夸大文本 → BLOCKED
+    r = mod.scan_claim_text("系统已实现零幻觉，基因引擎已可用，正在自我进化，完全自治无人值守。")
+    assert r["status"] == "BLOCKED", r
+    assert r["violations"] >= 3, r
+    assert "绝对化质量" in r["by_category"], r
+
+    # ② 诚实文本 → OK
+    r = mod.scan_claim_text("本模块实现并经局部验证，尚未证实运行时接线；未做生产部署。")
+    assert r["status"] == "OK", r
+
+    # ③ 引用并拒绝的语境 → 不得假阳性（关键回归）
+    r = mod.scan_claim_text(
+        "## 明确剔除的假货\n\n| 材料 | 剔除理由 |\n|---|---|\n"
+        "| 超级进化20 | 要求封印模型概率随机性、改模型底层权重（技术上不可能） |\n")
+    assert r["status"] == "OK", f"引用并拒绝的语境被误拦（假阳性）: {r['details'][:2]}"
+    assert r["allowed_context_hits"] >= 1, r
+
+    # ④ D05 §6.1：不得把未接线说成已运行
+    r = mod.scan_unwired_claims("EVM 治理系统已整体运行，多 Agent 已相互制约。")
+    assert r["status"] == "BLOCKED", r
+    assert r["violations"] >= 2, r
+    r = mod.scan_unwired_claims("EVM 核心独立可运行；示例导入失败；调度/Token/Claw/YAML 无接线。")
+    assert r["status"] == "OK", r
+
+    # ⑤ CLI 退出码契约：违规 exit=1，合规 exit=0
+    rr = subprocess.run([sys.executable, str(SCRIPT), "--claim-scan", "零幻觉，完全自治"],
+                        capture_output=True, text=True)
+    assert rr.returncode == 1, rr.stdout[:200]
+    rr = subprocess.run([sys.executable, str(SCRIPT), "--claim-scan", "实现并经局部验证，未做部署"],
+                        capture_output=True, text=True)
+    assert rr.returncode == 0, rr.stdout[:200]
+    print("✓ D07 扫描器：拦夸大/放诚实/不误拦引用拒绝语境；D05 未接线误报必拦")
+
+
+def test_coord_probe_distinguishes_env_from_bug() -> None:
+    """行为：坐标探针必须区分「服务未加载」与「无屏幕录制权限」，不得混报成代码 bug。
+
+    2026-09-20 实测根因：kimi-cu MCP 进程在，但 LaunchAgent
+    `ai.kimi.cu.service`（MachServices/XPC）未加载 → 一切调用返回
+    "service unavailable: perform failed after retries"。
+    加载后 list_apps 立即恢复。这是环境修复，不是代码修复——必须如实区分。
+    """
+    import importlib.util
+    probe = Path(__file__).resolve().parent.parent / "scripts" / "kimi_coord_probe.py"
+    assert probe.is_file(), f"探针不存在: {probe}"
+    spec = importlib.util.spec_from_file_location("kcp", probe)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    diag = mod.diagnose_service()
+    assert "service_loaded" in diag and "screen_capture_ok" in diag, diag
+    assert isinstance(diag["service_loaded"], bool), diag
+    # screen_capture_ok 必须是三态（True/False/None），None 不得当成可用
+    assert diag["screen_capture_ok"] in (True, False, None), diag
+
+    # 探针在环境不满足时必须返回非零（不得报 PASS）
+    r = subprocess.run([sys.executable, str(probe)], capture_output=True, text=True, timeout=90)
+    assert r.returncode != 0, f"环境不满足时探针不得报成功: rc={r.returncode}\n{r.stdout[:300]}"
+    assert "PASS" not in r.stdout or "不得报 PASS" in r.stdout, r.stdout[:300]
+    # 必须明确归因（服务/权限），不得只说「失败」
+    assert ("服务" in r.stdout or "权限" in r.stdout), r.stdout[:300]
+    print("✓ 坐标探针区分环境问题与代码 bug（服务未加载/无屏幕录制权限 分别归因）")
+
+
 def test_readonly_mode_blocks_writes() -> None:
     """只读模式（PGG_EVOLUTION_READONLY=1）：写动作必拦，读动作必放行。
 
@@ -635,6 +710,8 @@ def main() -> None:
     test_evidence_exaggeration_and_downgrade()
     test_gene_l5_constraints_derived_not_faked()
     test_gene_match_warns_on_missing_l5()
+    test_d07_claim_scanner_and_false_positive()
+    test_coord_probe_distinguishes_env_from_bug()
     test_readonly_mode_blocks_writes()
     test_gate_scans_untracked_files()
     test_feedback_record()
