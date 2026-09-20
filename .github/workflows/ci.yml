@@ -134,6 +134,41 @@ jobs:
           print("D07/D05 扫描器验证通过（拦夸大/放诚实/不误拦引用拒绝）")
           PY
 
+      - name: Verify L3 feature mode requires verifiable entry (防橡皮图章)
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("se", Path("scripts/self_evolve.py").resolve())
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          def mkdiff(n_add, n_del=0):
+              out = ["--- /dev/null", "+++ b/new.py"]
+              out += [f"+new {i}" for i in range(n_add)]
+              out += [f"-old {i}" for i in range(n_del)]
+              return "\n".join(out)
+          big = mkdiff(500)
+          # 纯新增 → 放宽
+          r = m.apply_gate(["new.py"], big, backup_dir="/tmp", mode="feature", added_paths={"new.py"})
+          assert r["checks"]["L3_diff_size"]["feature_eligible"] is True, r["checks"]["L3_diff_size"]
+          # 含修改行 → 必退回（防橡皮图章）
+          r = m.apply_gate(["new.py"], mkdiff(480, 20), backup_dir="/tmp",
+                           mode="feature", added_paths={"new.py"})
+          l3 = r["checks"]["L3_diff_size"]
+          assert l3["feature_eligible"] is False and l3["ok"] is False, l3
+          # 路径含旧文件 → 必退回
+          r = m.apply_gate(["old.py"], big, backup_dir="/tmp", mode="feature", added_paths=set())
+          assert r["checks"]["L3_diff_size"]["feature_eligible"] is False, r
+          # 默认模式不受影响
+          r = m.apply_gate(["new.py"], big, backup_dir="/tmp")
+          assert r["checks"]["L3_diff_size"]["mode"] == "evolution", r
+          # 硬上限仍在
+          r = m.apply_gate(["new.py"], mkdiff(m.GATE_DEFAULTS["feature_max_diff_lines"] + 100),
+                           backup_dir="/tmp", mode="feature", added_paths={"new.py"})
+          assert r["checks"]["L3_diff_size"]["ok"] is False, "feature 必须有硬上限"
+          print("L3 分模式验证通过（纯新增才放宽，含修改/旧文件必退回）")
+          PY
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'

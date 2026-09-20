@@ -1059,6 +1059,15 @@ GATE_DEFAULTS = {
         ".github/", ".gitignore", "LICENSE",
     ],
     "max_diff_lines": 200,
+    # L3 分模式（2026-09-20 苹果哥批准）：
+    # 问题：改老逻辑与加新模块混在同一阈值下，导致「加功能」每次都被 200 行拦住。
+    # 设计原则（防橡皮图章）：放宽不得只靠「声明这是新功能」，必须有可验证准入条件：
+    #   1. 变更集里**零删除/零修改**（`-` 行只允许出现在文件头 +++/---，即纯新增）
+    #   2. 变更路径**全部是新增文件**（git status 中为 ??，不存在于 HEAD）
+    #   3. 仍受硬上限约束（feature_max_diff_lines），不能无限放宽
+    # 任一条件不满足 → 退回 evolution 模式的 200 行阈值（fail-closed）。
+    "feature_max_diff_lines": 2000,
+    "mode": "evolution",  # evolution | feature
     "secret_patterns": [
         r"sk-[A-Za-z0-9]{16,}",
         r"gh[pousr]_[A-Za-z0-9]{20,}",
@@ -1094,16 +1103,22 @@ def _glob_match(path: str, patterns: list[str]) -> bool:
 
 
 def apply_gate(paths: list[str], diff_text: str = "", backup_dir: str | None = None,
-               max_diff_lines: int | None = None) -> dict:
+               max_diff_lines: int | None = None, mode: str | None = None,
+               added_paths: set[str] | None = None) -> dict:
     """五层应用门禁 L1-L5（对应 docs/GATES.md §1）：Apply 前的真刹车。
 
     修复（文档与实现不一致）：此前 GATES.md 写了 L1-L5 五层门禁，代码里 allowlist/backup 零匹配，
     宿主接入后拿不到任何刹车能力。本函数把五层落成可调用、可测的真检查。
 
     默认 fail-closed：任何一层失败即 BLOCKED，不做“自动放行”。
+
+    mode="feature"（苹果哥 2026-09-20 批准）：放宽 L3 上限至 feature_max_diff_lines，
+    但仅当变更集**纯新增**（零修改/删除行）且路径**全为新增文件**时生效；
+    否则自动退回 evolution 阈值（fail-closed，防橡皮图章）。
     """
     if max_diff_lines is None:
         max_diff_lines = GATE_DEFAULTS["max_diff_lines"]
+    added_paths = added_paths or set()
     checks: dict = {}
     diff_text = diff_text or ""
 
@@ -1123,13 +1138,36 @@ def apply_gate(paths: list[str], diff_text: str = "", backup_dir: str | None = N
         "checked": len(paths),
     }
 
-    # L3 diff 大小
+    # L3 diff 大小（分模式：evolution 严 / feature 宽但需可验证准入）
     diff_lines = len([ln for ln in diff_text.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))])
-    checks["L3_diff_size"] = {
-        "ok": diff_lines <= max_diff_lines,
-        "detail": f"{diff_lines} 行变更（上限 {max_diff_lines}）",
-        "diff_lines": diff_lines,
-    }
+    mode = (mode or GATE_DEFAULTS["mode"]).lower()
+    if mode == "feature":
+        # 准入条件（必须全部满足，否则退回 evolution 阈值）
+        removed = [ln for ln in diff_text.splitlines()
+                   if ln.startswith("-") and not ln.startswith("---")]
+        eligible = not removed and bool(paths) and all(p in added_paths for p in paths)
+        eff_max = GATE_DEFAULTS["feature_max_diff_lines"] if eligible else max_diff_lines
+        detail = (f"{diff_lines} 行变更（feature 模式上限 {eff_max}）"
+                  if eligible else
+                  f"{diff_lines} 行变更（feature 准入不满足，退回上限 {eff_max}）")
+        checks["L3_diff_size"] = {
+            "ok": diff_lines <= eff_max,
+            "detail": detail,
+            "diff_lines": diff_lines,
+            "mode": mode,
+            "feature_eligible": eligible,
+            "ineligible_reason": (None if eligible else
+                                  ("存在修改/删除行（非纯新增）" if removed else
+                                   "存在非新增文件路径（修改了已有文件）")),
+            "removed_lines": len(removed),
+        }
+    else:
+        checks["L3_diff_size"] = {
+            "ok": diff_lines <= max_diff_lines,
+            "detail": f"{diff_lines} 行变更（上限 {max_diff_lines}）",
+            "diff_lines": diff_lines,
+            "mode": "evolution",
+        }
 
     # L4 密钥扫描（只报位置与类型，不打印密钥值）
     hits = []
@@ -1204,6 +1242,31 @@ def gate_paths_from_git(repo: Path | None = None,
     if extra:
         diff_text = diff_text + "\n" + "\n".join(extra)
     return paths, diff_text
+
+
+def git_added_paths(repo: Path | None = None) -> set[str]:
+    """返回工作区中**新增文件**路径集（未跟踪 + 已暂存新增）。
+
+    feature 模式准入用：只有当变更路径全在这个集合里（= 纯新增文件、
+    没动任何已有文件）才允许放宽 L3 上限。
+    """
+    import subprocess
+    cwd = str(repo or PLUGIN_DIR.parent)
+    out: set[str] = set()
+    try:
+        r1 = subprocess.run(["git", "-C", cwd, "ls-files", "--others", "--exclude-standard"],
+                            capture_output=True, text=True, timeout=30)
+        out |= {p for p in r1.stdout.splitlines() if p.strip()}
+        # 已暂存的新增（A）文件
+        r2 = subprocess.run(["git", "-C", cwd, "diff", "--cached", "--name-status", "HEAD"],
+                            capture_output=True, text=True, timeout=30)
+        for ln in r2.stdout.splitlines():
+            parts = ln.split("\t")
+            if len(parts) >= 2 and parts[0].startswith("A"):
+                out.add(parts[1])
+    except Exception:
+        return out
+    return out
 
 
 def status_summary() -> dict:
@@ -1907,6 +1970,8 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="配合 --gene-l5-backfill：真写盘（否则 dry-run）")
     ap.add_argument("--gate", nargs="*", metavar="PATH", help="五层应用门禁 L1-L5 自检（无参时取 git 工作区变更；可显式传路径）")
     ap.add_argument("--gate-backup", metavar="DIR", help="--gate 的 L1 备份目录")
+    ap.add_argument("--gate-mode", choices=["evolution", "feature"], default=None,
+                    help="--gate 的 L3 模式：evolution(默认,200行) | feature(纯新增可至2000行，需可验证准入)")
     ap.add_argument("--evidence", metavar="CLAIM_ID", help="登记一条主张的证据等级（需 --level；不满足最低要求则拒绝登记）")
     ap.add_argument("--level", choices=list(EVIDENCE_LEVELS), help="证据等级 E0-E9（配合 --evidence）")
     ap.add_argument("--artifact", default="", metavar="PATH", help="证据工件路径（E1-E9）")
@@ -1995,7 +2060,9 @@ def main() -> int:
                 sys.exit(1)
         else:
             paths, diff_text = gate_paths_from_git()
-        result = apply_gate(paths, diff_text, backup_dir=args.gate_backup)
+        result = apply_gate(paths, diff_text, backup_dir=args.gate_backup,
+                            mode=args.gate_mode,
+                            added_paths=git_added_paths())
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0 if result["allow_apply"] else 1)
 

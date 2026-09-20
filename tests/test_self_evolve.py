@@ -507,6 +507,61 @@ def test_gene_match_warns_on_missing_l5() -> None:
     print("✓ 基因复用时缺 L5 必警告（不静默复用）")
 
 
+def test_gate_l3_feature_mode_requires_verifiable_entry() -> None:
+    """行为：L3 feature 模式必须「可验证准入」，不得变成橡皮图章。
+
+    苹果哥 2026-09-20 批准分模式。设计约束（防橡皮图章）：
+    放宽仅当 ①零修改/删除行（纯新增）②路径全为新增文件；任一不满足退回 200 行。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_l3", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def mkdiff(n_add, n_del=0, path="new.py"):
+        out = ["--- /dev/null", f"+++ b/{path}"]
+        out += [f"+new line {i}" for i in range(n_add)]
+        out += [f"-old line {i}" for i in range(n_del)]
+        return "\n".join(out)
+
+    big = mkdiff(500)
+
+    # ① 纯新增 + 路径全新 → 放宽到 feature 上限
+    r = mod.apply_gate(["new.py"], big, backup_dir="/tmp", mode="feature", added_paths={"new.py"})
+    l3 = r["checks"]["L3_diff_size"]
+    assert l3["feature_eligible"] is True and l3["ok"] is True, l3
+    assert l3["mode"] == "feature", l3
+
+    # ② 含修改/删除行 → 不得放宽（关键反证）
+    r = mod.apply_gate(["new.py"], mkdiff(480, 20), backup_dir="/tmp",
+                       mode="feature", added_paths={"new.py"})
+    l3 = r["checks"]["L3_diff_size"]
+    assert l3["feature_eligible"] is False, l3
+    assert l3["ok"] is False, f"含修改行仍放宽=橡皮图章: {l3}"
+    assert "非纯新增" in l3["ineligible_reason"], l3
+
+    # ③ 路径含已有文件 → 不得放宽
+    r = mod.apply_gate(["old.py"], big, backup_dir="/tmp", mode="feature", added_paths=set())
+    l3 = r["checks"]["L3_diff_size"]
+    assert l3["feature_eligible"] is False and l3["ok"] is False, l3
+
+    # ④ 混合（一个新一个旧）→ 不得放宽
+    r = mod.apply_gate(["new.py", "old.py"], big, backup_dir="/tmp",
+                       mode="feature", added_paths={"new.py"})
+    assert r["checks"]["L3_diff_size"]["feature_eligible"] is False, r["checks"]["L3_diff_size"]
+
+    # ⑤ 默认 evolution 模式不受影响：500 行仍拦
+    r = mod.apply_gate(["new.py"], big, backup_dir="/tmp")
+    l3 = r["checks"]["L3_diff_size"]
+    assert l3["mode"] == "evolution" and l3["ok"] is False, l3
+
+    # ⑥ feature 硬上限仍存在（不能无限放宽）
+    huge = mkdiff(mod.GATE_DEFAULTS["feature_max_diff_lines"] + 100)
+    r = mod.apply_gate(["new.py"], huge, backup_dir="/tmp", mode="feature", added_paths={"new.py"})
+    assert r["checks"]["L3_diff_size"]["ok"] is False, "feature 模式必须有硬上限"
+    print("✓ L3 分模式：纯新增才放宽，含修改/旧文件必退回 200 行（非橡皮图章）")
+
+
 def test_d07_claim_scanner_and_false_positive() -> None:
     """行为：D07 排除词扫描器必须拦夸大、放行诚实、不误拦「引用并拒绝」语境。
 
@@ -719,6 +774,7 @@ def main() -> None:
     test_evidence_exaggeration_and_downgrade()
     test_gene_l5_constraints_derived_not_faked()
     test_gene_match_warns_on_missing_l5()
+    test_gate_l3_feature_mode_requires_verifiable_entry()
     test_d07_claim_scanner_and_false_positive()
     test_coord_probe_distinguishes_env_from_bug()
     test_readonly_mode_blocks_writes()

@@ -9,11 +9,31 @@
 |---|---|---|
 | **L1 备份** | 变更文件已备份（带时间戳） | BLOCKED |
 | **L2 allowlist** | 变更路径在白名单内 | BLOCKED |
-| **L3 diff 大小** | patch 行数超限（如 >200 行） | BLOCKED |
+| **L3 diff 大小** | patch 行数超限（evolution 模式 >200 行 / feature 模式 >2000 行） | BLOCKED |
 | **L4 密钥扫描** | 无 token/key/secret 明文 | BLOCKED |
 | **L5 危险模式** | 无 rm -rf/force push/生产切换 | BLOCKED |
 
 **默认行为**：`allow_apply_default=false`（不批准就不应用）。
+
+### L3 分模式（2026-09-20 苹果哥批准）
+
+问题：改老逻辑与加新模块混在同一阈值下，导致「加功能」每次都被 200 行拦住。
+
+```bash
+python3 scripts/self_evolve.py --gate --gate-backup /tmp/bk                    # evolution（默认，200 行）
+python3 scripts/self_evolve.py --gate --gate-backup /tmp/bk --gate-mode feature # feature（至 2000 行）
+```
+
+**防橡皮图章**：feature 模式放宽**不只靠声明**，必须同时满足两个可验证准入条件：
+
+1. **零修改/删除行**——变更集必须是纯新增（`-` 行只允许出现在文件头 `+++`/`---`）
+2. **变更路径全部是新增文件**——不存在于 HEAD（git status 为 `??` 或已暂存的 `A`）
+
+任一不满足 → **自动退回 evolution 的 200 行阈值**（fail-closed），并在 `L3_diff_size` 里报
+`feature_eligible: false` 与 `ineligible_reason`。feature 模式仍有 2000 行硬上限，不能无限放宽。
+
+实测（2026-09-20）：修改 3 个已有文件共 174 行时，feature 模式正确报
+`feature_eligible=false`、`ineligible_reason="存在修改/删除行（非纯新增）"`。
 
 ## 2. 三重进化门禁（每轮闭环必须输出）
 
