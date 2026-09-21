@@ -1072,7 +1072,18 @@ def test_signal_taxonomy_match_is_auditable() -> None:
     merged = mod._all_signal_tables()
     local = [k for k in merged if k.startswith("pgg_")]
     assert local, "应有本地扩展信号"
-    assert len(merged) == len(mod.SIGNAL_TAXONOMY) + len(local), "合并表应恰好是标准+本地"
+    # 合并表 = GENE-STD 24 + ROUTE 机遇信号 + pgg_ 本地，三者并集（交集 4 个去重）
+    # 更新理由：本库补齐 APEX-EVOLUTION-ROUTE §4.1 的 20 个机遇信号后，
+    # 合并表不再只是「标准+本地」。断言改为按**并集**校验，并显式验证
+    # 每张表的键都没丢——比较键数量更强，不是放松。
+    gene_only = set(mod.SIGNAL_TAXONOMY)
+    opp_only = set(mod.OPPORTUNITY_SIGNALS)
+    local_keys = {f"pgg_{k}" for k in mod.PGG_LOCAL_SIGNALS}
+    expected = gene_only | opp_only | local_keys
+    assert set(merged) == expected, \
+        f"合并表应为三张表并集: 缺{expected - set(merged)} 多{set(merged) - expected}"
+    # 反向确认：GENE-STD 原文键不得带前缀（不得被征用）
+    assert all(not k.startswith("pgg_") for k in gene_only), gene_only
 
     # ③ 归一实测：中文长句 → 标准键
     hits, unmapped = mod.normalize_signals(["发现故障或缺陷", "子系统报错/不可用"])
@@ -1428,6 +1439,73 @@ def test_ghost_scan_space_path_three_branches() -> None:
     print("✓ 含空格路径三支消歧：全长存在/head 存在/都不存在，均正确")
 
 
+def test_evolution_route_selection_from_opportunity_signals() -> None:
+    """运行时机遇信号 → 进化路径选择（APEX-EVOLUTION-ROUTE §4.1 / §1.1）。
+
+    背景（实质错误，两套表不得互盖）：
+    上游有**两套**信号表：
+      · APEX-GENE-STANDARD-EXT §4.2（24 个核心信号）— 生成/分类基因用
+      · APEX-EVOLUTION-ROUTE §4.1（20 个机遇信号）— 运行时选路径用
+    两表交集仅 4 个。本库先前只实现了前者，存在机制盲区。
+
+    本测试钉死：
+      ① 两套表并存，不互相覆盖（交集 4 个自然合并）
+      ② 信号 → 路径映射正确（五个路径都可命中）
+      ③ **无命中时 route=None**，不默认选一条
+      ④ **平票时 ambiguous=True**，不武断取第一个
+      ⑤ 未知信号原样列出，不静默丢弃
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_route", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    gene_std = set(mod.SIGNAL_TAXONOMY)
+    opp = set(mod.OPPORTUNITY_SIGNALS)
+    assert len(gene_std) == 24, f"GENE-STD 应 24 个: {len(gene_std)}"
+    assert len(opp) == 20, f"ROUTE 应 20 个: {len(opp)}"
+    # ① 两表并存：合并表必含两者全部键
+    merged = mod._all_signal_tables()
+    assert gene_std <= set(merged), f"基因标准信号丢失: {gene_std - set(merged)}"
+    assert opp <= set(merged), f"机遇信号丢失: {opp - set(merged)}"
+    shared = gene_std & opp
+    assert len(shared) == 4, f"两表交集应 4 个（实测）: {len(shared)} {sorted(shared)}"
+
+    # ② 五个路径都能命中
+    cases = {
+        "perf_bottleneck": "P-OPTIMIZE",
+        "recurring_error": "P-REPAIR",
+        "explore_opportunity": "P-INNOVATE",
+        "user_feature_request": "P-EXPLORE",
+        "curriculum_target": "P-CURRICULUM",
+    }
+    for sig, want in cases.items():
+        got = mod.select_evolution_route([sig])
+        assert got["route"] == want, f"{sig} 应 → {want}，实得 {got['route']}"
+        assert got["ambiguous"] is False, got
+
+    # ③ 无命中 → None（不默认选）
+    none_route = mod.select_evolution_route(["totally-not-a-signal"])
+    assert none_route["route"] is None, none_route
+    assert none_route["candidates"] == [], none_route
+
+    # ④ 平票 → ambiguous=True（不得用字典序冒充匹配度）
+    amb = mod.select_evolution_route(["capability_gap", "perf_bottleneck", "recurring_error"])
+    assert amb["ambiguous"] is True, f"三个信号各命中一条路径应报平票: {amb}"
+    assert len(amb["candidates"]) == 3, amb
+    # 但单一命中的明确情况不得误报平票
+    clear = mod.select_evolution_route(["recurring_error", "repair_loop_detected"])
+    assert clear["ambiguous"] is False, clear
+    assert clear["route"] == "P-REPAIR", clear
+
+    # ⑤ 多命中情况不得误报 ambiguous=False 错
+    two = mod.select_evolution_route(["perf_bottleneck", "stable_success_plateau"])
+    assert two["route"] == "P-OPTIMIZE" and two["ambiguous"] is False, two
+    assert len(two["candidates"][0]["matched"]) == 2, two
+
+    print("✓ 进化路线选择：两表并存 / 五路径可达 / 无命中不默认 / 平票标记 / 未知不丢弃")
+
+
 def test_shortfall_report_wires_defect_rate_to_real_gaps() -> None:
     """系统短板体检：把实测缺口接进缺陷率公式（接线，不是摆设字段）。
 
@@ -1573,6 +1651,7 @@ def main() -> None:
     test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts()
     test_ghost_scan_space_path_three_branches()
     test_shortfall_report_wires_defect_rate_to_real_gaps()
+    test_evolution_route_selection_from_opportunity_signals()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
