@@ -197,3 +197,29 @@ python3 scripts/self_evolve.py --ghost-scan '内联文本 `/path/to/doc.md`'
 |---|---|
 | `~/.hermes/.../apex_evolution_genes.sqlite3`，直接打开查询 | **BLOCKED**（ghosts=1, lazy=0） |
 | 同一路径 + 「首次运行时生成，沙箱内可删可回滚」 | **WATCH**（ghosts=0, lazy=1） |
+
+### 命令名只给 WATCH（mention ≠ use）
+
+**实测教训（2026-09-21）**：首版把反引号里的 `` `pgg-*` `` 一律当命令，
+扫 PGG-WIKI 技能库时 **2363 个文件报 961 个 BLOCKED、402 处「命令幽灵」**。
+实查发现那些 `pgg-xxx` 大多是 **skill 名**或已归档 skill 名，不是可执行命令。
+
+这正是本库自己写下的 **mention vs use 陷阱**：**提及**不等于**调用**。
+修假阳性的方向是**修扫描器**，不是改文档措辞。
+
+**修改**：
+
+1. 命令名（裸反引号标识符）→ 只报 **WATCH**，且**先排除已知 skill 名**
+2. 新增「路径形式的命令引用」（`~/.local/bin/pgg-xxx`）→ 这才是硬证据，不存在即 **BLOCKED**
+3. 路径正则支持**含空格路径**（`~/Library/Application Support/...`）——
+   首版会在第一个空格截断，造出 `~/Library/Application` 这种假幽灵
+
+**实测**：同一批 400 个技能文件，BLOCKED 从 **960+ → 158**，幽灵从 **2800+ → 522**。
+
+**三项边界断言（防修假阳性把真问题漏掉）**：
+
+| 输入 | 判定 |
+|---|---|
+| `~/.hermes/workspace/apex_evolution_genes.sqlite3`（退役路径裸引用） | **BLOCKED** |
+| `/Users/.../Library/Application Support/PGG/.../qwen3.sock`（真存在） | **OK** |
+| `~/Library/Application Support/NoSuchThing/x.json`（不存在） | **BLOCKED**，且引用**不截断** |

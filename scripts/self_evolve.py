@@ -902,7 +902,10 @@ def scan_unwired_claims(text: str) -> dict:
 #   - 只读：绝不对被扫文件做任何修改
 GHOST_PATH_PATTERNS = (
     # ~/.something/... 或 /Users/xxx/... 形式，带扩展名或已知目录
+    # ★ 路径**可含空格**（如 `~/Library/Application Support/...`）——本库实测
+    #   漏掉空格会在第一个空格处截断，造出「~/Library/Application」这种假幽灵。
     re.compile(r"(?:~/|/Users/[A-Za-z0-9_.-]+/)[A-Za-z0-9_./\u4e00-\u9fff\-]+"
+               r"(?: [A-Za-z0-9_\u4e00-\u9fff\-][A-Za-z0-9_./\u4e00-\u9fff\-]*)*"
                r"(?:\.(?:json|db|sqlite3?|py|md|sh|yaml|yml|toml|plist|txt))?"),
 )
 
@@ -914,6 +917,41 @@ _GHOST_CMD_PATTERNS = (
     re.compile(r"`(pgg-[a-z0-9][a-z0-9-]+)`"),
     re.compile(r"`(hermes-[a-z0-9][a-z0-9-]+)`"),
 )
+
+# 路径形式的命令引用（带目录）——这种才是硬证据，不存在就是真幽灵
+_GHOST_CMD_PATH_PATTERNS = (
+    re.compile(r"((?:~/|/Users/[A-Za-z0-9_.-]+/)[A-Za-z0-9_./\-]+/(?:pgg|hermes)-[a-z0-9][a-z0-9-]+)"),
+)
+
+# ★ 已知 skill 名集合（懒加载，避免与命令混淆）
+#
+# 实测教训（2026-09-21）：首版把反引号里的 `pgg-*` 一律当命令，结果扫
+# PGG-WIKI skill 库时 2363 个文件报 961 个 BLOCKED、402 处「命令幽灵」——
+# 实查发现那些 `pgg-xxx` 大多是 **skill 名**或已归档 skill 名，不是可执行命令。
+# 这正是本库自己写下的「mention vs use」陷阱：**提及**不等于**调用**。
+# 修假阳性的方向是修扫描器，不是改文档措辞。
+_KNOWN_SKILL_NAMES: set[str] | None = None
+
+
+def _known_skill_names() -> set[str]:
+    """PGG-WIKI 下的全部 skill 目录名（含归档层）。懒加载并缓存。"""
+    global _KNOWN_SKILL_NAMES
+    if _KNOWN_SKILL_NAMES is not None:
+        return _KNOWN_SKILL_NAMES
+    names: set[str] = set()
+    root = Path(os.environ.get("PGG_SKILLS_ROOT", str(Path.home() / "PGG-WIKI" / "skills")))
+    try:
+        if root.is_dir():
+            for p in root.rglob("*"):
+                try:
+                    if p.is_dir() and (p / "SKILL.md").exists():
+                        names.add(p.name)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    _KNOWN_SKILL_NAMES = names
+    return names
 
 
 # 惰性路径提示词：描述为「运行时才生成」的引用不算幽灵。
@@ -958,6 +996,15 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
     def _resolve(raw: str) -> Path | None:
         try:
             s = raw.rstrip(".,;:)]}）】、")
+            # 带空格的路径：只有当**含空格的全长**不存在、而**截断到空格**
+            # 之前的那段存在时，才把空格当作句子边界而非路径的一部分。
+            if " " in s:
+                whole = Path(os.path.expanduser(s)) if s.startswith("~/") else Path(s)
+                if not whole.exists():
+                    head = s.split(" ")[0].rstrip(".,;:)")
+                    headp = Path(os.path.expanduser(head)) if head.startswith("~/") else Path(head)
+                    if not headp.exists():
+                        s = whole.as_posix()
             if s.startswith("~/") or s == "~":
                 return Path(home) / s[2:] if len(s) > 2 else Path(home)
             p = Path(s)
@@ -993,7 +1040,30 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
             ghosts.append({"kind": "path", "ref": raw, "resolved": str(p),
                            "excerpt": ctx})
 
-    # ② 命令引用
+    # ② 路径形式的命令引用 —— 带目录的硬证据，不存在就是真幽灵
+    for pat in _GHOST_CMD_PATH_PATTERNS:
+        for m in pat.finditer(text):
+            raw = m.group(1)
+            if _GHOST_PATH_EXEMPT.search(raw):
+                continue
+            checked += 1
+            p = _resolve(raw)
+            if p is not None and p.exists():
+                continue
+            ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
+            if p is not None and str(p).startswith(("/tmp/", "/var/folders/")):
+                suspects.append({"kind": "command_path", "ref": raw,
+                                 "why": "临时路径下的命令，不作为幽灵", "excerpt": ctx})
+                continue
+            ghosts.append({"kind": "command_path", "ref": raw,
+                           "resolved": str(p) if p else None, "excerpt": ctx})
+
+    # ③ 裸反引号标识符 —— **只给 WATCH**，不当幽灵
+    #
+    # 理由：反引号里的 `pgg-*` 在文档里可能是 skill 名、历史名、或真命令，
+    # 仅凭字符串无法区分（低假阳性优先于高召回）。只有能判定**不是**
+    # skill 名、且 PATH 里也没有时，才报为 suspect 供人工确认。
+    known_skills = _known_skill_names()
     seen_cmds = set()
     for pat in _GHOST_CMD_PATTERNS:
         for m in pat.finditer(text):
@@ -1004,8 +1074,12 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
             checked += 1
             if _cmd_exists(cmd):
                 continue
+            if cmd in known_skills:
+                continue   # 是 skill 名，不是命令——不报
             ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
-            ghosts.append({"kind": "command", "ref": cmd, "resolved": None, "excerpt": ctx})
+            suspects.append({"kind": "command_name", "ref": cmd,
+                             "why": "PATH 中无此命令且非 skill 名；可能是历史命令名，需人工确认",
+                             "excerpt": ctx})
 
     # 去重
     def _dedup(items):
@@ -1031,7 +1105,9 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
         "checked": checked,
         "note": "规范化陷阱 #1：引用了不存在的路径/命令，即「规范文件幽灵引用」，"
                 "其后果是一跑即崩或默默拿到空结果，非报错。只读扫描，不修文件。"
-                "lazy=运行时才生成且文档明确说明的路径（降为 WATCH，不算幽灵）。",
+                "lazy=运行时才生成且文档明确说明的路径（降为 WATCH，不算幽灵）。"
+                "command_name 类只给 WATCH：反引号标识符可能只是 skill 名/历史名，"
+                "仅凭字符串无法与真命令区分（低假阳性优先于高召回）。",
     }
 
 
