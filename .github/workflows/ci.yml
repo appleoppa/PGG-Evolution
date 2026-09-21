@@ -214,7 +214,30 @@ jobs:
                               "见 ~/.pgg-ghost-ci-no-such-dir/file.json"],
                              capture_output=True, text=True)
           assert r.returncode == 1, f"BLOCKED 必须 exit=1: rc={r.returncode}"
-          print("幽灵扫描验证通过（自扫干净/真幽灵拦/mention≠use/示例豁免/只读/退出码）")
+          
+          # ⑦ 装机路径不得当幽灵：本插件文档必然写「装到哪」。
+          #    真实失败：run 35600239899 在 Linux 空白机红了（那些路径不存在）。
+          #    用临时 HOME 模拟全新机器，断言不依赖本机是否装有 Pi。
+          old_h = os.environ.get("HOME")
+          os.environ["HOME"] = tempfile.mkdtemp()
+          try:
+              d = mod.scan_ghost_references("装到 `~/.pi/agent/evolution`", base_dir=".")
+              assert d["ghost_count"] == 0, f"装机路径不得当幽灵: {d}"
+              assert d["runtime_ref_count"] >= 1, f"装机路径应可见计数: {d}"
+          finally:
+              if old_h is not None:
+                  os.environ["HOME"] = old_h
+          
+          # ⑧ 退役路径必须仍拦 —— 即使 HOME 被指向 /tmp（防误豁免）
+          old_home = os.environ.get("HOME")
+          os.environ["HOME"] = tempfile.mkdtemp()
+          try:
+              d = mod.scan_ghost_references("`~/.hermes/workspace/apex_evolution_genes.sqlite3`")
+              assert d["status"] == "BLOCKED", f"HOME 变化不得误豁免: {d}"
+          finally:
+              if old_home is not None:
+                  os.environ["HOME"] = old_home
+          print("幽灵扫描验证通过（自扫干净/真幽灵拦/mention≠use/示例豁免/只读/退出码/装机路径/防误豁免）")
           PY
 
       - name: Verify shortfall report wires real gaps (缺数据不得缩分母)
