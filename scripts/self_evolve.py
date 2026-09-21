@@ -1116,6 +1116,110 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
     }
 
 
+# ── 系统短板体检（把缺陷率公式接到真实缺口上，不是摆设字段）────────
+#
+# 设计意图：`defect_rate` 本身只是个计算器。接线才是价值所在——
+# 把**本系统自身的真实缺口**映射为受监测维度，算出单一可比较的短板指标，
+# 回答「现在最该修哪个」。
+#
+# 关键纪律（否则就是漂亮的假分数）：
+#   1. 每一项缺口必须来自**实测**，不得手填
+#   2. 缺数据时该维度纳入分母、计 0 分，**不得**从分母里偷偷移除
+#      （移除分母 = 用“没测”冒充“没毛病”，是本库反复踩过的坑）
+#   3. 总分不得用于提权（优先级仍看 R0-R4 与平台/法律硬约束）
+SHORTFALL_DIMENSIONS = (
+    # (维度名, 含义)
+    ("gene_l5_explicit", "基因显式 L5 约束/验证覆盖（0 = 全靠推导，非作者本意）"),
+    ("gene_signals", "基因信号可归一到规范信号表（0 = 全是自由文本）"),
+    ("evidence_ledger", "证据账本有已登记条目（0 = 从未登记过证据）"),
+    ("feedback_signal", "基因复用反馈有样本（0 = 无反馈，无法淘汰劣质基因）"),
+    ("gate_coverage", "门禁覆盖未跟踪文件（0 = 只看已提交内容）"),
+)
+
+
+def _shortfall_defects() -> dict:
+    """从**实测**推导各维度缺陷度（0.0-1.0，1.0=完全缺失）。
+
+    每项都来自真实文件/真实扫描结果，不手填。
+    取不到的维度的取值规则：**计 1.0（完全缺失）而不是丢弃**——
+    取不到数据本身就是一种短板。
+    """
+    d: dict[str, float] = {}
+
+    # ① 基因显式 L5 覆盖（实测：审计最近化）
+    total, exp_c = 0, 0
+    genes_dir = SANDBOX / "genes"
+    for f in sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []:
+        try:
+            gs = json.loads(f.read_text(encoding="utf-8")).get("genes", [])
+        except Exception:
+            continue
+        for g in gs:
+            total += 1
+            if isinstance(g.get("constraints"), dict) and g.get("constraints"):
+                exp_c += 1
+    d["gene_l5_explicit"] = 1.0 - (exp_c / total) if total else 1.0
+
+    # ② 信号归一覆盖（实测：调同一函数，不重复实现）
+    entries, norm = 0, 0
+    for f in sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []:
+        try:
+            gs = json.loads(f.read_text(encoding="utf-8")).get("genes", [])
+        except Exception:
+            continue
+        for g in gs:
+            sm = g.get("signals_match") or []
+            if sm:
+                entries += 1
+                if normalize_signals(sm)[0]:
+                    norm += 1
+    d["gene_signals"] = 1.0 - (norm / entries) if entries else 1.0
+
+    # ③ 证据账本是否真被用过（实测：读账本文件）
+    led = SANDBOX / "evidence" / "ledger.json"
+    claims = 0
+    try:
+        if led.exists():
+            claims = len(json.loads(led.read_text(encoding="utf-8")).get("claims", {}))
+    except Exception:
+        claims = 0
+    d["evidence_ledger"] = 0.0 if claims > 0 else 1.0
+
+    # ④ 反馈样本（实测：读 feedback.json）
+    events = _load_feedback().get("events", [])
+    d["feedback_signal"] = 0.0 if len(events) >= 3 else (1.0 if not events else 0.5)
+
+    # ⑤ 门禁是否覆盖未跟踪文件（实测：真跑一次）
+    try:
+        _, diff = gate_paths_from_git(REPO)
+        d["gate_coverage"] = 0.0 if diff else 1.0
+    except Exception:
+        d["gate_coverage"] = 1.0
+
+    return d
+
+
+def shortfall_report() -> dict:
+    """系统短板体检：真实缺口 → 缺陷率 → 优先级建议。只读。"""
+    defects = _shortfall_defects()
+    # 分母固定为**全部声明维度**，不在报告里动态增减（否则历史不可比）
+    n = len(SHORTFALL_DIMENSIONS)
+    rate = defect_rate(defects, total_metrics=n)
+    ranked = sorted(defects.items(), key=lambda kv: -kv[1])
+    return {
+        "status": "OK",
+        "defect_rate": rate,
+        "metrics_total": n,
+        "boost_coeff": DEFECT_BOOST_COEFF,
+        "dimensions": {k: round(v, 6) for k, v in defects.items()},
+        "worst_first": [k for k, v in ranked if v > 0][:3],
+        "healthy": [k for k, v in defects.items() if v == 0],
+        "formula": "avg*0.5 + boost*max**1.5（最大短板非线性惩罚）",
+        "boundary": "只读体检；总分**不得**用于提权（优先级仍看 R0-R4 与平台/法律硬约束）；"
+                    "取不到数据的维度计 1.0 而非丢弃（没测≠没毛病）",
+    }
+
+
 def health_deep(check_memory: bool = True) -> dict:
     """Ψ 深度健康监测：基因库完整性、基因 schema 合法性、记忆库连通性、沙箱可写性、反馈状态。
 
@@ -2493,6 +2597,8 @@ def main() -> int:
     ap.add_argument("--gene-from-memory", metavar="TOPIC", help="双向写回 B 向：记忆颗粒→基因（从记忆库检索经验，LLM 提炼基因）")
     ap.add_argument("--list-genes", action="store_true", help="列出基因库")
     ap.add_argument("--gene-l5", action="store_true", help="基因 L5 约束层审计：逐条推导 constraints/validation 并统计缺口（只读）")
+    ap.add_argument("--shortfall", action="store_true",
+                    help="系统短板体检：把实测缺口喂进缺陷率公式，给出最该修的维度（只读）")
     ap.add_argument("--gene-l5-backfill", action="store_true", help="回填推导的 L5 派生字段（默认 dry-run，需 --apply 才写盘）")
     ap.add_argument("--health-deep", action="store_true", help="Ψ 深度健康监测：基因库/记忆库/沙箱/反馈完整性")
     ap.add_argument("--no-memory", action="store_true", help="health-deep 跳过记忆库检查（CI/无记忆库环境用）")
@@ -2713,6 +2819,10 @@ def main() -> int:
     if args.gene_from_memory:
         print(json.dumps(gene_from_memory(args.gene_from_memory, args.llm_provider or "deepseek-v4-flash", args.llm_model), ensure_ascii=False, indent=2))
         return 0
+    if args.shortfall:
+        print(json.dumps(shortfall_report(), ensure_ascii=False, indent=2))
+        return 0
+
     if args.gene_l5:
         rep = gene_l5_report()
         print(json.dumps({k: v for k, v in rep.items() if k != "rows"}, ensure_ascii=False, indent=2))
