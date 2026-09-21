@@ -14,23 +14,75 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const execFileAsync = promisify(execFile);
 
-const PLUGIN_DIR = join(homedir(), ".pi", "agent", "evolution", "plugin-self-evolution");
-const ENGINE = join(PLUGIN_DIR, "scripts", "self_evolve.py");
-const UNITS = join(PLUGIN_DIR, "scripts", "evolution_units.py");
+// 引擎位置解析（修可移植性缺陷）
+//
+// 原实现硬编码 `~/.pi/agent/evolution/plugin-self-evolution`，
+// 实测后果（CI run 35609238449 真失败）：在没装 Pi 的环境（如 CI 空白机）
+// 里那个目录不存在，探针一调就 `python3: can't open file ... No such file`，
+// 整个插件挂掉。
+//
+// 改为多候选依次探测（环境变量优先，便于测试与自定义部署）：
+//   ① PGG_SELF_EVOLUTION_DIR（显式指定）
+//   ② 宿主装机路径（~/.pi/agent/evolution/plugin-self-evolution）
+//   ③ 仓库自身（本文件在 plugins/pi/ 下，上溯两级即仓库根）
+// 都找不到时：工具返回 NEEDS_SPEC 而非抛异常（fail-closed 但不崩栈）。
+const ENGINE_REL = join("scripts", "self_evolve.py");
+
+function engineCandidates(): string[] {
+  const out: string[] = [];
+  const envDir = process.env["PGG_SELF_EVOLUTION_DIR"];
+  if (envDir) out.push(join(envDir, ENGINE_REL));
+  out.push(join(homedir(), ".pi", "agent", "evolution", "plugin-self-evolution", ENGINE_REL));
+  // 本文件位于 <repo>/plugins/pi/ → 上溯两级为仓库根
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    out.push(join(here, "..", "..", ENGINE_REL));
+  } catch {
+    /* import.meta.url 不可用时跳过候选③ */
+  }
+  return out;
+}
+
+function resolveEngine(): string | null {
+  for (const p of engineCandidates()) {
+    try {
+      if (existsSync(p)) return p;
+    } catch {
+      /* 忽略不可读候选 */
+    }
+  }
+  return null;
+}
+
+const ENGINE = resolveEngine();
+const UNITS = ENGINE ? join(dirname(ENGINE), "evolution_units.py") : null;
 const KILL_SWITCH = "SELF_EVOLUTION_PLUGIN_DISABLED";
 
 function disabled(): boolean {
   return process.env[KILL_SWITCH] === "1";
 }
 
+/** 引擎缺失时的统一回复（fail-closed，但不抛异常炸掉整个插件）。 */
+function engineMissing(): string {
+  return JSON.stringify({
+    status: "NEEDS_SPEC",
+    reason: "未找到自进化引擎 self_evolve.py",
+    searched: engineCandidates(),
+    hint: "设置 PGG_SELF_EVOLUTION_DIR 指向仓库根，或确认插件已装入宿主",
+  });
+}
+
 async function runEngine(args: string[]): Promise<string> {
+  if (!ENGINE) return engineMissing();
   const { stdout } = await execFileAsync("python3", [ENGINE, ...args], {
     timeout: 30000,
     maxBuffer: 2 * 1024 * 1024,
@@ -39,6 +91,7 @@ async function runEngine(args: string[]): Promise<string> {
 }
 
 async function runUnits(unit: string, action: string, payload: unknown): Promise<string> {
+  if (!UNITS) return engineMissing();
   // 非零退出码 = 真拦截；这里把 stdout 原样返回，让调用方看到拒绝理由
   try {
     const { stdout } = await execFileAsync(
@@ -436,6 +489,7 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId) {
       if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      if (!ENGINE) return result(engineMissing());
       const { stdout } = await execFileAsync("python3", [ENGINE, "--gene-l5"], {
         timeout: 60000, maxBuffer: 8 * 1024 * 1024,
       });
@@ -461,6 +515,7 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
       if (!params.text && !params.file) {
         return result(JSON.stringify({ status: "NEEDS_SPEC", reason: "需提供 text 或 file" }));
       }
+      if (!ENGINE) return result(engineMissing());
       const args = params.file ? [ENGINE, "--claim-file", params.file] : [ENGINE, "--claim-scan", params.text];
       const { stdout } = await execFileAsync("python3", args, {
         timeout: 60000, maxBuffer: 8 * 1024 * 1024,
