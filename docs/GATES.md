@@ -146,3 +146,34 @@ python3 scripts/self_evolve.py --risk-classify "更新凭据密钥"
 
 **诚实边界**：R0-R4 表是**本地工程映射**（原手册为部署模板，不声称已部署到生产）；
 它约束的是本仓库的动作分级，不构成对外能力声明。
+
+## 8. 幽灵引用扫描（吸收自《开智进化循环执行规范》陷阱 #1）
+
+```bash
+python3 scripts/self_evolve.py --ghost-scan /path/to/doc.md     # 扫文件
+python3 scripts/self_evolve.py --ghost-scan '内联文本 `~/.x/y.json`'
+```
+
+**幽灵引用** = 文档/工具里写了某个路径或命令，但那个世界已经不存在了。
+后果不是报错，而是**一跑就崩**或**默默拿到空结果**——表面"工具在"，实际不可用。
+
+**本轮实测撞到两次**（不是假想威胁）：
+
+1. `pgg-promotion-authority-matrix` 硬编码已退役的 Hermes 基因库路径
+   → 一跑即 `sqlite3.OperationalError: unable to open database file`
+2. 《开智进化循环执行规范》**自己**引用了 `~/.hermes/workspace/...`、
+   `apex_evolution_genes.sqlite3` 与 `~/.hermes/.../cron-rounds/…`
+   → 它把"规范文件幽灵引用"列为陷阱 #1，**它自己犯了**（扫描实测检出 2 处）
+
+**判定纪律**：
+
+| 情形 | 判定 |
+|---|---|
+| 引用的路径不存在 | BLOCKED（幽灵） |
+| 引用的命令不在 PATH 且不在已知 bin | BLOCKED（幽灵） |
+| `/tmp` 等临时路径不存在 | WATCH（suspect，不算幽灵） |
+| `/path/to`、`<X>`、`...`、`example` | 豁免（示例，不是真引用） |
+| 全部存在 | OK |
+
+**设计边界**：只判**能机器验证**的引用（路径存在性、命令存在性），
+不解析自然语言描述；只读，绝不修改被扫文件。

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -878,6 +879,136 @@ def scan_unwired_claims(text: str) -> dict:
         "violations": len(viol),
         "details": viol,
         "note": "D05 §6.1：下列缺口不是「尚待优化的已运行能力」，不得当作能力声明",
+    }
+
+
+# ── 幽灵引用扫描（吸收自资源盘《开智进化循环执行规范》陷阱 #1）──────────
+#
+# 来源：`2.apex公式规范/开智进化循环执行规范.md` §常见陷阱 #1「规范文件幽灵引用」。
+#
+# 含义：规范/工具/文档里写了某个路径、命令或数据库，但那个世界已经不存在了。
+# 后果不是报错，而是**一跑就崩**或**默默拿到空结果**——表面“工具在”，实际不可用。
+#
+# 本轮实测撞到两次，都是这个坑：
+#   ① `pgg-promotion-authority-matrix` 硬编码已退役的 Hermes 基因库路径，
+#      一跑即 sqlite3.OperationalError: unable to open database file
+#   ② 《开智进化循环执行规范》**自己**引用了 `~/.hermes/workspace/...` 与
+#      `apex_evolution_genes.sqlite3`——它警告过的缺陷，它自己犯了
+#
+# 设计纪律：
+#   - 只扫**能被机器判定**的引用（存在的绝对/家目录路径、命令、sqlite 文件）
+#   - 不猜、不解析自然语言描述里的路径
+#   - 明确区分「幽灵」（不存在）与「存疑」（无法判定）
+#   - 只读：绝不对被扫文件做任何修改
+GHOST_PATH_PATTERNS = (
+    # ~/.something/... 或 /Users/xxx/... 形式，带扩展名或已知目录
+    re.compile(r"(?:~/|/Users/[A-Za-z0-9_.-]+/)[A-Za-z0-9_./\u4e00-\u9fff\-]+"
+               r"(?:\.(?:json|db|sqlite3?|py|md|sh|yaml|yml|toml|plist|txt))?"),
+)
+
+# 这些是“示例路径”而不是真引用，不应当作幽灵
+_GHOST_PATH_EXEMPT = re.compile(
+    r"(?:/path/to|/tmp/|<[^>]+>|\{|\}|\.\.\.|xxx|example|示例)", re.I)
+
+_GHOST_CMD_PATTERNS = (
+    re.compile(r"`(pgg-[a-z0-9][a-z0-9-]+)`"),
+    re.compile(r"`(hermes-[a-z0-9][a-z0-9-]+)`"),
+)
+
+
+def _cmd_exists(cmd: str) -> bool:
+    """命令是否存在（查 PATH 与常见 bin 目录，不执行它）。"""
+    if shutil.which(cmd):
+        return True
+    for d in (Path.home() / ".pi/agent/bin", Path.home() / ".local/bin",
+              Path("/usr/local/bin", "/opt/homebrew/bin".split(",")[0])):
+        try:
+            if (d / cmd).exists():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
+    """扫描文本里的幽灵引用（指向已不存在路径/命令）。
+
+    返回 {status, ghosts, suspects, checked, note}。
+    status: BLOCKED（有幽灵）/ WATCH（有存疑）/ OK（均存在）。
+
+    只读：不修文件、不建路径、不执行被引用的命令。
+    """
+    home = str(Path.home())
+    base = Path(base_dir).expanduser() if base_dir else Path.cwd()
+    ghosts, suspects, checked = [], [], 0
+
+    def _resolve(raw: str) -> Path | None:
+        try:
+            s = raw.rstrip(".,;:)]}）】、")
+            if s.startswith("~/") or s == "~":
+                return Path(home) / s[2:] if len(s) > 2 else Path(home)
+            p = Path(s)
+            return p if p.is_absolute() else (base / p)
+        except Exception:
+            return None
+
+    # ① 路径引用
+    for pat in GHOST_PATH_PATTERNS:
+        for m in pat.finditer(text):
+            raw = m.group(0)
+            if _GHOST_PATH_EXEMPT.search(raw):
+                continue
+            checked += 1
+            p = _resolve(raw)
+            if p is None:
+                continue
+            ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
+            if p.exists():
+                continue
+            # 只有看起来像“必须存在”的引用才算幽灵；/tmp 下不算
+            if str(p).startswith(("/tmp/", "/var/folders/")):
+                suspects.append({"kind": "path", "ref": raw, "why": "临时路径，不作为幽灵",
+                                 "excerpt": ctx})
+                continue
+            ghosts.append({"kind": "path", "ref": raw, "resolved": str(p),
+                           "excerpt": ctx})
+
+    # ② 命令引用
+    seen_cmds = set()
+    for pat in _GHOST_CMD_PATTERNS:
+        for m in pat.finditer(text):
+            cmd = m.group(1)
+            if cmd in seen_cmds:
+                continue
+            seen_cmds.add(cmd)
+            checked += 1
+            if _cmd_exists(cmd):
+                continue
+            ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
+            ghosts.append({"kind": "command", "ref": cmd, "resolved": None, "excerpt": ctx})
+
+    # 去重
+    def _dedup(items):
+        out, seen = [], set()
+        for it in items:
+            k = (it["kind"], it["ref"])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(it)
+        return out
+
+    ghosts, suspects = _dedup(ghosts), _dedup(suspects)
+    status = "BLOCKED" if ghosts else ("WATCH" if suspects else "OK")
+    return {
+        "status": status,
+        "ghosts": ghosts,
+        "suspects": suspects,
+        "ghost_count": len(ghosts),
+        "suspect_count": len(suspects),
+        "checked": checked,
+        "note": "规范化陷阱 #1：引用了不存在的路径/命令，即「规范文件幽灵引用」，"
+                "其后果是一跑即崩或默默拿到空结果，非报错。只读扫描，不修文件。",
     }
 
 
@@ -2290,6 +2421,8 @@ def main() -> int:
                     help="最大短板非线性惩罚：SPEC 形如 '名字=值,名字=值'（只读计算）")
     ap.add_argument("--defect-total", type=int, default=None, metavar="N",
                     help="--defect-rate 的受监测维度总数（默认=传入项数；传 12 可复现上游 EVM 口径）")
+    ap.add_argument("--ghost-scan", metavar="PATH_OR_TEXT",
+                    help="幽灵引用扫描：传存在的文件路径→读文件扫；否则当文本扫（只读）")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
 
@@ -2342,6 +2475,23 @@ def main() -> int:
         res = scan_unwired_claims(args.unwired_scan)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0 if res["status"] == "OK" else 1
+
+    if args.ghost_scan is not None:
+        # 幽灵引用扫描：只读，不改被扫文件
+        target = Path(args.ghost_scan).expanduser()
+        if target.is_file():
+            try:
+                text = target.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                print(json.dumps({"status": "BLOCKED", "reason": f"无法读取：{e}"}, ensure_ascii=False))
+                return 1
+            res = scan_ghost_references(text, base_dir=str(target.parent))
+            res["target"] = str(target)
+        else:
+            res = scan_ghost_references(args.ghost_scan, base_dir=str(Path.cwd()))
+            res["target"] = "(inline text)"
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 1 if res["status"] == "BLOCKED" else 0
 
     if args.defect_rate is not None:
         # 最大短板非线性惩罚：只读计算，不写盘
