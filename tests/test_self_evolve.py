@@ -1328,7 +1328,29 @@ def test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts() -> None:
     assert strict_got["status"] == "BLOCKED", f"无惰性提示必须仍为 BLOCKED: {strict_got}"
     assert strict_got["ghost_count"] >= 1, strict_got
 
-    print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、惰性降级、只读")
+    # ⑥ 含空格路径不得截断（实测 bug：~/Library/Application Support/ 会在
+    #    第一个空格断成 ~/Library/Application，造出假幽灵）
+    space_src = "见 `~/Library/Application Support/PGG-Ghost-Scan-NoSuchDir/x.json`"
+    space_got = mod.scan_ghost_references(space_src)
+    assert space_got["ghost_count"] >= 1, f"含空格的不存在路径必须检出: {space_got}"
+    refs_sp = [g["ref"] for g in space_got["ghosts"]]
+    assert any("Application Support" in r and "PGG-Ghost-Scan-NoSuchDir" in r for r in refs_sp), \
+        f"引用不得在空格处截断: {refs_sp}"
+
+    # ⑦ mention ≠ use：裸反引号标识符只给 WATCH，不当幽灵
+    #    实测教训：首版把 `pgg-*` 一律当命令，扫技能库报 961 个假 BLOCKED——
+    #    那些大多是 skill 名（提及），不是命令调用。
+    unknown_cmd = mod.scan_ghost_references("参考 `pgg-totally-made-up-skill-name` 的做法")
+    assert unknown_cmd["ghost_count"] == 0, f"裸标识符不得当幽灵: {unknown_cmd}"
+    assert any(s["kind"] == "command_name" for s in unknown_cmd["suspects"]), unknown_cmd
+
+    # ⑧ 但路径形式的命令引用是硬证据 → 不存在必须 BLOCKED
+    path_cmd = mod.scan_ghost_references("调 `~/.pi/agent/bin/pgg-no-such-tool-xyz` 执行")
+    assert path_cmd["status"] == "BLOCKED", f"路径形式的命令不存在必须 BLOCKED: {path_cmd}"
+    assert path_cmd["ghost_count"] >= 1, path_cmd
+
+    print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、惰性降级、"
+          "含空格不截断、mention≠use、只读")
 
 
 def test_gate_scans_untracked_files() -> None:
