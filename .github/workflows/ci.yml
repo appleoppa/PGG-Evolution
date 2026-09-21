@@ -260,7 +260,12 @@ jobs:
               try:
                   d = mod._shortfall_defects()
                   assert len(d) == declared, f"缺数据不得缩分母: {len(d)} != {declared}"
-                  assert all(v == 1.0 for v in d.values()), d
+                  # 依赖 SANDBOX 的维度计 1.0；gate_coverage 真测门禁能力，
+                  # 与 SANDBOX 无关（这正是它正确的证据）
+                  sb = [k for k, _ in mod.SHORTFALL_DIMENSIONS if k != "gate_coverage"]
+                  assert all(d[k] == 1.0 for k in sb), d
+                  assert d["gate_coverage"] == mod._probe_untracked_coverage(), \
+                      "gate_coverage 必须来自真测，不得随 SANDBOX 变化"
                   r = mod.shortfall_report()
                   assert r["metrics_total"] == declared, r
                   assert r["defect_rate"] > 0.5, "空环境不得显得更健康"
