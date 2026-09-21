@@ -1311,7 +1311,24 @@ def test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts() -> None:
     assert isinstance(mod.GHOST_PATH_PATTERNS, tuple)
     assert isinstance(mod._GHOST_CMD_PATTERNS, tuple)
 
-    print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、只读")
+    # ⑥ 惰性路径降级：文档描述为「运行时生成/沙箱内可删」的引用降为 WATCH
+    #    依据：本库 docs/EVIDENCE.md 写 ledger.json「落…（沙箱内，可删可回滚）」
+    #    —— 该文件确实首次登记证据时才生成，文档**准确**，
+    #    但在扫描器眼里与真幽灵长得一样。
+    lazy_src = "账本落 `~/.pgg-ghost-lazy-probe/ledger.json`（首次运行时生成，沙箱内可删可回滚）"
+    lazy_got = mod.scan_ghost_references(lazy_src)
+    assert lazy_got["ghost_count"] == 0, f"惰性路径不得当幽灵: {lazy_got}"
+    assert lazy_got["status"] == "WATCH", f"应降为 WATCH 而非 OK: {lazy_got}"
+    assert lazy_got["lazy_count"] >= 1, lazy_got
+
+    # ⑦ 关键防线：同样的路径，**没有**惰性提示仍必须 BLOCKED
+    #    —— 防止豁免被滥用成橡皮图章（否则任何幽灵都能加句“将来会生成”放行）
+    strict_src = "数据库在 `~/.pgg-ghost-lazy-probe/ledger.json`，直接打开查询"
+    strict_got = mod.scan_ghost_references(strict_src)
+    assert strict_got["status"] == "BLOCKED", f"无惰性提示必须仍为 BLOCKED: {strict_got}"
+    assert strict_got["ghost_count"] >= 1, strict_got
+
+    print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、惰性降级、只读")
 
 
 def test_gate_scans_untracked_files() -> None:
