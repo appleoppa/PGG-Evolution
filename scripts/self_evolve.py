@@ -954,6 +954,35 @@ def _known_skill_names() -> set[str]:
     return names
 
 
+# 运行时装机根：**本插件自己**运行时装到哪里的声明式前向引用。
+#
+# 为什么需要这个：本仓库就是插件本体，它的文档必然要写「装到哪」——
+# 如 `~/.pi/agent/evolution`（沙箱）、`~/.pi/agent/extensions`（宿主扩展）。
+# 在全新机器/CI 空白环境里这些路径**当然不存在**，但它们不是幽灵。
+#
+# 实测教训（CI run 35600239899）：首版拿本仓库做自扫断言，在 Linux CI 上
+# 直接红——因为 docs/USAGE.md 引用了 `~/.pi/agent/evolution`。
+#
+# 纪律（不得成橡皮图章）：
+#   - 只在**显式声明**的前缀下豁免，不是「所有 ~/.pi/... 都放行」
+#   - 降级为 **runtime_refs（可见、计数）**，不混入 OK，也不当幽灵
+#   - 报告里如实列出，读的人能看到「有 N 处是装机路径声明」
+RUNTIME_INSTALL_ROOTS = (
+    "~/.pi/agent/evolution",       # 本插件沙箱
+    "~/.pi/agent/extensions",      # 宿主扩展目录（插件被宿主加载）
+    "~/.pi/agent/repos/PGG-Evolution",  # 仓库自身的两个软链
+)
+
+
+def _is_runtime_install_ref(path_str: str) -> bool:
+    """是否落在声明的运行时装机根下（规范化后前缀匹配）。"""
+    p = path_str.rstrip("/")
+    for root in RUNTIME_INSTALL_ROOTS:
+        if p == root or p.startswith(root + "/"):
+            return True
+    return False
+
+
 # 惰性路径提示词：描述为「运行时才生成」的引用不算幽灵。
 # 依据：本库 `docs/EVIDENCE.md` 写「账本落 `…/evidence/ledger.json`
 # （沙箱内，可删可回滚）」——该文件确实首次登记证据时才生成，
@@ -991,7 +1020,8 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
     """
     home = str(Path.home())
     base = Path(base_dir).expanduser() if base_dir else Path.cwd()
-    ghosts, suspects, lazy, checked = [], [], [], 0
+    ghosts, suspects, lazy, runtime = [], [], [], []
+    checked = 0
 
     def _resolve(raw: str) -> Path | None:
         try:
@@ -1030,12 +1060,23 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
             ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
             if p.exists():
                 continue
-            # 只有看起来像“必须存在”的引用才算幽灵；/tmp 下不算
-            if str(p).startswith(("/tmp/", "/var/folders/")):
+            # ① 优先：落在声明的运行时装机根下 → runtime_refs
+            #    （必须先判，否则假 HOME 在 /tmp 时会误落入临时路径分支）
+            if _is_runtime_install_ref(raw):
+                runtime.append({"kind": "path", "ref": raw, "resolved": str(p),
+                                "why": "声明的运行时装机根（本插件装到哪里），全新环境下本就不存在",
+                                "excerpt": ctx})
+                continue
+            # ② 真临时路径不算幽灵。
+            #    ★ 必须看**原始引用文本**，不看解析后的绝对路径——
+            #    实测漏洞：当 HOME 被指向 /tmp/... 时（CI 或临时环境），
+            #    `~/.hermes/.../apex_evolution_genes.sqlite3` 会解析到 /tmp 下，
+            #    被误豁免成 WATCH，而它实际是应拦的退役路径幽灵。
+            if raw.startswith(("/tmp/", "/var/folders/")):
                 suspects.append({"kind": "path", "ref": raw, "why": "临时路径，不作为幽灵",
                                  "excerpt": ctx})
                 continue
-            # 近旁有惰性提示词 → 降级为 lazy（WATCH），不直接判幽灵
+            # ③ 近旁有惰性提示词 → 降级为 lazy（WATCH），不直接判幽灵
             wide = text[max(0, m.start() - 120):m.end() + 120].replace("\n", " ")
             if _GHOST_LAZY_HINTS.search(wide):
                 lazy.append({"kind": "path", "ref": raw, "resolved": str(p),
@@ -1056,9 +1097,14 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
             if p is not None and p.exists():
                 continue
             ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
-            if p is not None and str(p).startswith(("/tmp/", "/var/folders/")):
+            if p is not None and raw.startswith(("/tmp/", "/var/folders/")):
                 suspects.append({"kind": "command_path", "ref": raw,
                                  "why": "临时路径下的命令，不作为幽灵", "excerpt": ctx})
+                continue
+            ctx = text[max(0, m.start() - 50):m.end() + 50].replace("\n", " ")
+            if _is_runtime_install_ref(raw):
+                runtime.append({"kind": "command_path", "ref": raw,
+                                "why": "声明的运行时装机根下的命令", "excerpt": ctx})
                 continue
             ghosts.append({"kind": "command_path", "ref": raw,
                            "resolved": str(p) if p else None, "excerpt": ctx})
@@ -1098,19 +1144,24 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
         return out
 
     ghosts, suspects, lazy = _dedup(ghosts), _dedup(suspects), _dedup(lazy)
+    runtime = _dedup(runtime)
     status = "BLOCKED" if ghosts else ("WATCH" if (suspects or lazy) else "OK")
     return {
         "status": status,
         "ghosts": ghosts,
         "suspects": suspects,
         "lazy": lazy,
+        "runtime_refs": runtime,
         "ghost_count": len(ghosts),
         "suspect_count": len(suspects),
         "lazy_count": len(lazy),
+        "runtime_ref_count": len(runtime),
         "checked": checked,
         "note": "规范化陷阱 #1：引用了不存在的路径/命令，即「规范文件幽灵引用」，"
                 "其后果是一跑即崩或默默拿到空结果，非报错。只读扫描，不修文件。"
                 "lazy=运行时才生成且文档明确说明的路径（降为 WATCH，不算幽灵）。"
+                "runtime_refs=声明的运行时装机根下的引用（如 ~/.pi/agent/evolution），"
+                "全新环境下本就不存在，**可见计数**但不冒充干净。"
                 "command_name 类只给 WATCH：反引号标识符可能只是 skill 名/历史名，"
                 "仅凭字符串无法与真命令区分（低假阳性优先于高召回）。",
     }
