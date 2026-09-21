@@ -2309,9 +2309,97 @@ PGG_LOCAL_SIGNALS: dict[str, list[str]] = {
 }
 
 
+# ── 运行时机遇信号（APEX-EVOLUTION-ROUTE §4.1）─────────────────────
+#
+# ★ 重要：上游存在**两套**信号表，用途不同，不得互相覆盖：
+#     · APEX-GENE-STANDARD-EXT §4.2（24 个）= 生成/分类**基因**时的信号键
+#     · APEX-EVOLUTION-ROUTE §4.1（20 个）= 运行时**机会检测**→选进化路径
+#   两表交集仅 4 个（capability_gap / perf_bottleneck / recurring_error /
+#   tool_bypass）。本库先只实现了前者，本轮补齐后者。
+#
+# 来源（实读）：`1.Apex仓库/apex-spiral/apex-standard/APEX-EVOLUTION-ROUTE.md`
+#   §1.1 路径映射：
+#     P-OPTIMIZE    ← perf_bottleneck, stable_success_plateau
+#     P-REPAIR      ← recurring_error, repair_loop_detected
+#     P-INNOVATE    ← force_innovation_after_repair_loop, explore_opportunity
+#     P-EXPLORE     ← user_feature_request, capability_gap
+#     P-CURRICULUM  ← curriculum_target
+#   工程价值：它把「这次该走哪条进化路线」从直觉变成信号驱动的选择。
+OPPORTUNITY_SIGNALS: dict[str, list[str]] = {
+    "user_feature_request": ["新功能请求", "希望支持", "能不能加", "需求提出"],
+    "user_improvement_suggestion": ["建议", "可以优化", "不如改成"],
+    "perf_bottleneck": ["性能瓶颈", "太慢", "耗时高"],
+    "capability_gap": ["能力缺口", "做不到", "尚未具备"],
+    "stable_success_plateau": ["稳定无进展", "平台期", "长期没变化"],
+    "external_opportunity": ["外部机会", "上游更新", "新发布"],
+    "recurring_error": ["反复出错", "老毛病", "又出现"],
+    "unsupported_input_type": ["不支持的类型", "无法解析", "格式不认"],
+    "evolution_stagnation_detected": ["进化停滞", "无进化增量", "原地打转"],
+    "repair_loop_detected": ["修了又坏", "修复循环", "反复修"],
+    "force_innovation_after_repair_loop": ["修复死循环后强制创新", "不能再修"],
+    "tool_bypass": ["绕过工具", "跳过程序", "旁路操作"],
+    "curriculum_target": ["课程目标", "系统性学习", "分阶段建设"],
+    "issue_already_resolved": ["已解决", "已修复", "无需处理"],
+    "openclaw_self_healed": ["自动愈合", "自愈完成"],
+    "empty_cycle_loop_detected": ["空转循环", "跑了但无产出"],
+    "explore_opportunity": ["探索机会", "可以试试新方向"],
+    "hub_search_miss_with_problem": ["检索未命中且有真实问题"],
+    "plateau_pivot_required": ["必须转向", "平台期强制换路"],
+    "plateau_pivot_suggested": ["建议转向", "可以换条路"],
+}
+
+# 路径选择规则（APEX-EVOLUTION-ROUTE §1.1 的机器可读形式）
+EVOLUTION_ROUTES: dict[str, dict] = {
+    "P-OPTIMIZE": {"triggers": ["perf_bottleneck", "stable_success_plateau"],
+                   "goal": "提升现有基因效率"},
+    "P-REPAIR": {"triggers": ["recurring_error", "repair_loop_detected"],
+                 "goal": "修复系统故障"},
+    "P-INNOVATE": {"triggers": ["force_innovation_after_repair_loop", "explore_opportunity"],
+                   "goal": "突破停滞，引入新方案"},
+    "P-EXPLORE": {"triggers": ["user_feature_request", "capability_gap"],
+                  "goal": "发现新能力"},
+    "P-CURRICULUM": {"triggers": ["curriculum_target"], "goal": "系统性能力建设"},
+}
+
+
+def select_evolution_route(signals) -> dict:
+    """根据命中的机会信号选进化路径（APEX-EVOLUTION-ROUTE §1.1）。只读。
+
+    返回全部命中路径（按命中数降序）；若都不命中则 route=None（不默定一个）。
+    不默认给路径：瞎选一条比不选更危险。
+    """
+    hits = set(signals or [])
+    scored = []
+    for rid, spec in EVOLUTION_ROUTES.items():
+        matched = [t for t in spec["triggers"] if t in hits]
+        if matched:
+            scored.append({"route": rid, "goal": spec["goal"], "matched": matched})
+    scored.sort(key=lambda x: -len(x["matched"]))
+    # 平票检测：命中数相同时**不武断取第一个**，而是如实标为 ambiguous。
+    # 实测：`capability_gap,perf_bottleneck,recurring_error` 三信号各命中一条
+    # 不同路径（P-EXPLORE/P-OPTIMIZE/P-REPAIR），按排序取首个是任意的
+    # ——那是用“恰好字典序靠前”冒充“匹配度更高”。
+    ambiguous = len(scored) > 1 and len(scored[0]["matched"]) == len(scored[1]["matched"])
+    return {
+        "route": scored[0]["route"] if scored else None,
+        "ambiguous": ambiguous,
+        "candidates": scored,
+        "boundary": "信号→路径映射来自 APEX-EVOLUTION-ROUTE §1.1；"
+                    "无命中时 route=None（不默认选一条）；"
+                    "ambiguous=True 时首选仅供候选，不得当最优（按同样命中数平票）",
+    }
+
+
 def _all_signal_tables() -> dict[str, list[str]]:
-    """APEX 24 标准信号 + PGG 本地扩展，保持可区分（本地项以 pgg_ 前缀标记）。"""
+    """三张表合并，保持来源可区分（不互相覆盖）：
+      · GENE-STD 24 个核心信号 → 原文键，无前缀
+      · ROUTE §4.1 机会信号 → 原文键（交集 4 个自然合并）
+      · PGG 本地扩展 → `pgg_` 前缀（不冒充 APEX 标准）
+    """
     merged = dict(SIGNAL_TAXONOMY)
+    for k, v in OPPORTUNITY_SIGNALS.items():
+        merged.setdefault(k, [])
+        merged[k] = sorted(set(merged[k]) | set(v))
     for k, v in PGG_LOCAL_SIGNALS.items():
         merged[f"pgg_{k}"] = v
     return merged
@@ -2650,6 +2738,8 @@ def main() -> int:
     ap.add_argument("--gene-l5", action="store_true", help="基因 L5 约束层审计：逐条推导 constraints/validation 并统计缺口（只读）")
     ap.add_argument("--shortfall", action="store_true",
                     help="系统短板体检：把实测缺口喂进缺陷率公式，给出最该修的维度（只读）")
+    ap.add_argument("--route", metavar="SIGNALS",
+                    help="按机会信号选进化路径（逗号分隔信号键，只读；无命中则为 None）")
     ap.add_argument("--gene-l5-backfill", action="store_true", help="回填推导的 L5 派生字段（默认 dry-run，需 --apply 才写盘）")
     ap.add_argument("--health-deep", action="store_true", help="Ψ 深度健康监测：基因库/记忆库/沙箱/反馈完整性")
     ap.add_argument("--no-memory", action="store_true", help="health-deep 跳过记忆库检查（CI/无记忆库环境用）")
@@ -2870,6 +2960,15 @@ def main() -> int:
     if args.gene_from_memory:
         print(json.dumps(gene_from_memory(args.gene_from_memory, args.llm_provider or "deepseek-v4-flash", args.llm_model), ensure_ascii=False, indent=2))
         return 0
+    if args.route is not None:
+        sigs = [s.strip() for s in (args.route or "").split(",") if s.strip()]
+        unknown = [s for s in sigs if s not in OPPORTUNITY_SIGNALS]
+        res = select_evolution_route(sigs)
+        res["input_signals"] = sigs
+        res["unknown_signals"] = unknown   # 未知信号原样列出，不静默丢弃
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+
     if args.shortfall:
         print(json.dumps(shortfall_report(), ensure_ascii=False, indent=2))
         return 0
