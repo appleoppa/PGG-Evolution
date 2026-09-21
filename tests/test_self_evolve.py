@@ -1247,6 +1247,73 @@ def test_defect_rate_penalizes_worst_shortfall() -> None:
     print("✓ 缺陷率：最大短板非线性惩罚，集中>分散，口径可复现上游")
 
 
+def test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts() -> None:
+    """幽灵引用扫描（吸收自资源盘《开智进化循环执行规范》陷阱 #1）。
+
+    含义：文档/工具引用了已不存在的路径或命令。
+    后果不是报错，而是**一跑就崩**或**默默拿到空结果**——表面「工具在」，实际不可用。
+
+    本轮实测撞到两次（教训）：
+      ① 晋升矩阵硬编码已退役 Hermes 基因库路径 → 一跑即崩
+      ② 《开智进化循环执行规范》**自己**引用了 `~/.hermes/...` 与
+        `apex_evolution_genes.sqlite3`——它警告过的缺陷，它自己犯了
+
+    核心不变式：
+      ① 真幽灵必须检出（存在性为准，不靠字符串猜测）
+      ② 干净文本不得误报（低假阳性优先于高召回）
+      ③ 示例路径（/path/to、<X>、…）必须豁免
+      ④ 临时路径（/tmp）不作为幽灵
+      ⑤ 去重：同一引用只报一次
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_ghost", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ① 真幽灵路径必须检出（用一个几乎不可能存在的绝对路径）
+    bogus = str(Path(tempfile.gettempdir()) / "pgg-ghost-scan-does-not-exist" / "x.json")
+    r = mod.scan_ghost_references(f"配置见 `{bogus}`", base_dir=str(Path.cwd()))
+    # /tmp 下的路径按设计归为 suspects 而非 ghosts，所以这里用非 tmp 路径验证
+    home_bogus = "~/.pgg-ghost-scan-definitely-absent-dir/file.json"
+    r2 = mod.scan_ghost_references(f"配置见 `{home_bogus}`", base_dir=str(Path.cwd()))
+    assert r2["status"] == "BLOCKED", r2
+    assert r2["ghost_count"] >= 1, r2
+    assert any("pgg-ghost-scan-definitely-absent" in g["ref"] for g in r2["ghosts"]), r2["ghosts"]
+
+    # ② 干净文本不得误报
+    clean = mod.scan_ghost_references("这里只有中文描述，没有任何路径或命令引用。")
+    assert clean["status"] == "OK", clean
+    assert clean["ghost_count"] == 0, clean
+
+    # ③ 示例路径必须豁免
+    for sample in ["放在 `/path/to/config.json`", "参考 `<HOME>/x.json`", "见 `.../file.json`"]:
+        got = mod.scan_ghost_references(sample)
+        assert got["ghost_count"] == 0, f"示例路径不得当幽灵: {sample} → {got}"
+
+    # ④ /tmp 下的不存在路径归为 suspects（临时路径），不是 ghosts
+    tmp_got = mod.scan_ghost_references(f"临时文件 `{bogus}`")
+    assert tmp_got["ghost_count"] == 0, f"临时路径不应算幽灵: {tmp_got}"
+
+    # ⑤ 去重：同一引用重复出现只报一次
+    dup_src = f"见 `{home_bogus}`，再强调 `{home_bogus}`"
+    dup = mod.scan_ghost_references(dup_src)
+    refs = [g["ref"] for g in dup["ghosts"] if "pgg-ghost-scan-definitely-absent" in g["ref"]]
+    assert len(refs) == 1, f"同一引用应去重: {refs}"
+
+    # 只读不变式：扫描不创建、不修改任何文件
+    probe_dir = Path(tempfile.mkdtemp())
+    before = sorted(p.name for p in probe_dir.iterdir())
+    mod.scan_ghost_references(f"`{probe_dir}/ghost.json`")
+    after = sorted(p.name for p in probe_dir.iterdir())
+    assert before == after, "幽灵引用扫描不得写任何文件（只读）"
+
+    # 若本机存在 Hermes 退役后的残留，这个扫描必须能识别（不依赖具体环境）
+    assert isinstance(mod.GHOST_PATH_PATTERNS, tuple)
+    assert isinstance(mod._GHOST_CMD_PATTERNS, tuple)
+
+    print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、只读")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1332,6 +1399,7 @@ def main() -> None:
     test_signal_taxonomy_match_is_auditable()
     test_risk_tier_classification_is_conservative()
     test_defect_rate_penalizes_worst_shortfall()
+    test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
