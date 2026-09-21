@@ -310,4 +310,144 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
   pi.registerTool(feedbackStatsTool);
   pi.registerTool(pruneTool);
   pi.registerTool(statusTool);
+  // ── 18. 证据等级登记（E0-E9 诚实性内核）────────────────────────
+  const evidenceTool = defineTool({
+    name: "pgg_self_evolution_evidence",
+    label: "自进化方案 · 登记证据等级",
+    description:
+      "登记一条主张的证据等级（E0-E9）。等级不够会被拒（谎报工件/跳级/夸大词/空文件均拦截）。" +
+      "E0 需 note 主张原文；E1/E4/E7/E8/E9 需 artifact；E2 需 artifact+note 符号名；" +
+      "E3/E5/E6 需 artifact+verify_cmd，且要 execute=true 才真跑命令。沙箱写。",
+    parameters: Type.Object({
+      claim_id: Type.String({ description: "主张 id，如 CLM-001" }),
+      level: Type.String({ description: "证据等级 E0-E9" }),
+      artifact: Type.Optional(Type.String({ description: "证据工件路径（E1-E9）" })),
+      verify_cmd: Type.Optional(Type.String({ description: "E3/E5/E6 的可执行校验命令" })),
+      execute: Type.Optional(Type.Boolean({ description: "显式授权真跑校验命令（默认 false）" })),
+      note: Type.Optional(Type.String({ description: "E0 主张文本 / E2 符号名 / 备注" })),
+      claim_text: Type.Optional(Type.String({ description: "主张原文（夸大词扫描用）" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const args = ["--evidence", params.claim_id, "--level", params.level];
+      if (params.artifact) args.push("--artifact", params.artifact);
+      if (params.verify_cmd) args.push("--verify-cmd", params.verify_cmd);
+      if (params.execute) args.push("--execute");
+      if (params.note) args.push("--note", params.note);
+      if (params.claim_text) args.push("--claim-text", params.claim_text);
+      return result(await runEngine(args));
+    },
+  });
+
+  // ── 19. 证据链读回（派生允许的状态词）────────────────────────
+  const evidenceStatusTool = defineTool({
+    name: "pgg_self_evolution_evidence_status",
+    label: "自进化方案 · 读回证据链",
+    description:
+      "读回证据链：重新校验每条证据，按前置依赖算最高可支撑等级，派生**允许的**状态词与禁用表述。" +
+      "不带 execute 时命令类证据（E3/E5/E6）保守失效；工件被删即降级。只读。",
+    parameters: Type.Object({
+      claim_id: Type.Optional(Type.String({ description: "主张 id（省略=全部）" })),
+      execute: Type.Optional(Type.Boolean({ description: "重跑命令类证据（默认 false）" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const args = ["--evidence-status"];
+      if (params.claim_id) args.push(params.claim_id);
+      if (params.execute) args.push("--execute");
+      return result(await runEngine(args));
+    },
+  });
+
+  pi.registerTool(evidenceTool);
+  pi.registerTool(evidenceStatusTool);
+
+  // ── 20. F1-F7 控制单元（状态机 + 布尔硬门）───────────────────
+  const unitsTool = defineTool({
+    name: "pgg_evolution_units",
+    label: "进化控制单元 · F1-F7",
+    description:
+      "调用 F1-F7 可执行控制单元（状态机 + 布尔硬门）。unit 取 F1-F7，action 取该单元动作" +
+      "（如 F1.create_gap/propose/verify/release，F2.plan/run，F3.record/compare/total_score，" +
+      "F4.route/memory_check，F5.dag_validate/ready/correlation/adjudicate，" +
+      "F6.propose/screen/approve/activate/deprecate，F7.evaluate/release/readback）。" +
+      "payload 为该动作的 JSON 参数。拒绝类结果会带 status=BLOCKED/NEEDS_SPEC 并说明理由" +
+      "（例：F3.total_score 永远 BLOCKED——不同量纲不得相加）。沙箱写。",
+    parameters: Type.Object({
+      unit: Type.String({ description: "控制单元 F1-F7" }),
+      action: Type.String({ description: "单元内动作，如 create_gap / total_score / correlation" }),
+      payload: Type.Optional(Type.String({ description: "JSON 参数（对象）" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      let parsed: unknown = {};
+      if (params.payload) {
+        try {
+          parsed = JSON.parse(params.payload);
+        } catch {
+          return result(JSON.stringify({ status: "NEEDS_SPEC", reason: "payload 非法 JSON" }));
+        }
+      }
+      return result(await runUnits(params.unit, params.action, parsed));
+    },
+  });
+
+  const unitsListTool = defineTool({
+    name: "pgg_evolution_units_list",
+    label: "进化控制单元 · 清单",
+    description: "列出 F1-F7 七个控制单元及其动作。只读。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const { stdout } = await execFileAsync("python3", [UNITS, "--list"], {
+        timeout: 30000, maxBuffer: 1024 * 1024,
+      });
+      return result(stdout);
+    },
+  });
+
+  pi.registerTool(unitsTool);
+  pi.registerTool(unitsListTool);
+
+  const geneL5Tool = defineTool({
+    name: "pgg_evolution_gene_l5",
+    label: "基因 L5 约束层 · 审计",
+    description:
+      "基因库 L5 约束层审计：逐条推导 constraints/validation 并统计显式覆盖率缺口。" +
+      "只读，不写盘。用于发现「基因只存了怎么做、没存什么条件下别用」的缺口。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const { stdout } = await execFileAsync("python3", [ENGINE, "--gene-l5"], {
+        timeout: 60000, maxBuffer: 8 * 1024 * 1024,
+      });
+      return result(stdout);
+    },
+  });
+
+  pi.registerTool(geneL5Tool);
+
+  const claimScanTool = defineTool({
+    name: "pgg_evolution_claim_scan",
+    label: "汇报文本扫描 · D07 排除词表",
+    description:
+      "扫描汇报/结算/主张文本，判定能否作为「现状/能力/授权」结论。" +
+      "基于 D07 排除词表（7 类）+ D05 §6.1 未接线清单（8 类）。" +
+      "只扫描，不改写被扫文本。违规时 exit=1。",
+    parameters: Type.Object({
+      text: Type.Optional(Type.String({ description: "直接传入要扫描的文本" })),
+      file: Type.Optional(Type.String({ description: "要扫描的文件路径（与 text 二选一）" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      if (!params.text && !params.file) {
+        return result(JSON.stringify({ status: "NEEDS_SPEC", reason: "需提供 text 或 file" }));
+      }
+      const args = params.file ? [ENGINE, "--claim-file", params.file] : [ENGINE, "--claim-scan", params.text];
+      const { stdout } = await execFileAsync("python3", args, {
+        timeout: 60000, maxBuffer: 8 * 1024 * 1024,
+      });
+      return result(stdout);
+    },
+  });
 }
