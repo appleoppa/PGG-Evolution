@@ -10,6 +10,20 @@ import importlib.util
 import os
 import subprocess
 import sys
+
+try:
+    import pytest  # 可选：仅用于 approx；缺失时用本地兜底，不让测试因缺依赖崩
+except ImportError:  # pragma: no cover
+    class _Approx:
+        def __init__(self, expected, abs=1e-6, rel=1e-6):
+            self.expected, self.abs, self.rel = expected, abs, rel
+        def __eq__(self, other):
+            return abs(other - self.expected) <= max(self.abs, self.rel * abs(self.expected))
+    class _PytestShim:
+        @staticmethod
+        def approx(expected, abs=1e-6, rel=1e-6):
+            return _Approx(expected, abs, rel)
+    pytest = _PytestShim()
 import tempfile
 from pathlib import Path
 
@@ -1180,6 +1194,59 @@ def test_risk_tier_classification_is_conservative() -> None:
     print("✓ 风险分级：R0-R4 就高不就低，未知保守 R2，R2+ 一律人工")
 
 
+def test_defect_rate_penalizes_worst_shortfall() -> None:
+    """最大短板非线性惩罚（吸收自 EVM 仓库 CoreFormula/EVM_FORMULA.py）。
+
+    只吸收可验证的真数学：avg*0.5 + boost*max**1.5。
+    明确**不吸收**其玄学层：`AncientTao` 七大道法强度硬编码为 1.0，
+    乘法系数恒等于 1（乘 1 = 没乘），对结果零作用。
+
+    核心不变式：
+      ① 同总量缺陷，**集中在单点**比**分散多点**惩罚更重
+         （系统承压看最弱环，不看平均值）
+      ② 口径必须可复现上游：--defect-total 12 得 0.140665
+      ③ 空输入 → 0.0，不崩栈
+      ④ 超界/负数输入钳制，不制造不真实的高惩罚
+      ⑤ 分母不得小于已报缺陷项数（防平均被偷换）
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_defect", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ① 集中 vs 分散（同为 0.8 总量，分母 12）
+    concentrated = mod.defect_rate({"Tok": 0.8}, total_metrics=12)
+    spread = mod.defect_rate({"Tok": 0.2, "Clw": 0.2, "Agt": 0.2, "Pan": 0.2}, total_metrics=12)
+    assert concentrated > spread, (
+        f"集中单点必须比分散更重：{concentrated} vs {spread}"
+    )
+    assert concentrated > spread * 2.5, "集中惩罚应显著高于分散（实测约 3.0 倍）"
+
+    # ② 复现上游固定 12 维口径（实测值与上游输出逐位一致）
+    assert mod.defect_rate({"Tok": 0.8}, total_metrics=12) == 0.140665, "须复现上游 0.140665"
+    assert mod.defect_rate({"Tok": 0.2, "Clw": 0.2, "Agt": 0.2, "Pan": 0.2}, total_metrics=12) == 0.04675
+    assert mod.defect_rate({"Tok": 0.4}, total_metrics=12) == 0.054614
+
+    # 默认口径分母=传入项数，与上游 12 维口径**不同**（不得含糊成同一个数）
+    default_denom = mod.defect_rate({"Tok": 0.8})
+    assert default_denom != 0.140665, "默认口径不得冒充上游 12 维口径"
+    assert default_denom == pytest.approx(0.507331, abs=1e-5), default_denom
+
+    # ③ 空输入
+    assert mod.defect_rate({}) == 0.0
+    assert mod.defect_rate(None) == 0.0
+
+    # ④ 钳制：负值不产生负缺陷率，超界不超 1.0
+    assert mod.defect_rate({"A": -5.0}) == 0.0, "负缺陷率必须钳到 0"
+    assert mod.defect_rate({"A": 99.0}, total_metrics=1) <= 1.0, "缺陷率不得超 1.0"
+
+    # ⑤ 分母不得小于已报项数
+    assert mod.defect_rate({"A": 0.8, "B": 0.8, "C": 0.8}, total_metrics=1) == \
+        mod.defect_rate({"A": 0.8, "B": 0.8, "C": 0.8}), "分母被下界钳制"
+
+    print("✓ 缺陷率：最大短板非线性惩罚，集中>分散，口径可复现上游")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1264,6 +1331,7 @@ def main() -> None:
     test_promotion_authority_matrix_read_only_and_fail_closed()
     test_signal_taxonomy_match_is_auditable()
     test_risk_tier_classification_is_conservative()
+    test_defect_rate_penalizes_worst_shortfall()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
