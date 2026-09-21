@@ -1349,8 +1349,44 @@ def test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts() -> None:
     assert path_cmd["status"] == "BLOCKED", f"路径形式的命令不存在必须 BLOCKED: {path_cmd}"
     assert path_cmd["ghost_count"] >= 1, path_cmd
 
+    # ⑨ CI/全新环境下自扫本仓库必须干净
+    #    真实失败：CI run 35600239899 在 Linux 空白机上红——
+    #    docs/USAGE.md 引用了 `~/.pi/agent/evolution`（插件自己的装机路径），
+    #    全新机器上本就不存在。修法是把声明的运行时装机根单独归类为
+    #    runtime_refs（可见、计数），而不是判成幽灵，也不是静默放过。
+    rt = mod.scan_ghost_references(
+        "装到 `~/.pi/agent/evolution` 与 `~/.pi/agent/extensions/`", base_dir=str(Path.cwd()))
+    # 本机若这些路径真存在，会先走 exists() 提前返回（也算正确）；
+    # 关键是**不存在时**不得判成幽灵。故用临时 HOME 模拟全新机器。
+    import os as _os
+    old_home_rt = _os.environ.get("HOME")
+    _os.environ["HOME"] = tempfile.mkdtemp()
+    try:
+        rt = mod.scan_ghost_references(
+            "装到 `~/.pi/agent/evolution` 与 `~/.pi/agent/extensions/`", base_dir=str(Path.cwd()))
+        assert rt["ghost_count"] == 0, f"装机路径不得当幽灵: {rt}"
+        assert rt["runtime_ref_count"] >= 1, f"装机路径应可见计数: {rt}"
+        assert rt["status"] == "OK", f"装机路径不得拉高状态: {rt['status']}"
+    finally:
+        if old_home_rt is not None:
+            _os.environ["HOME"] = old_home_rt
+
+    # ⑩ 但退役路径必须仍拦 —— 即使 HOME 被指向 /tmp（防误豁免）
+    #    原实现按**解析后**路径判 /tmp，HOME 一换就误豁免。
+    import os as _os
+    old_home = _os.environ.get("HOME")
+    _os.environ["HOME"] = tempfile.mkdtemp()
+    try:
+        ghost = mod.scan_ghost_references("数据库 `~/.hermes/workspace/apex_evolution_genes.sqlite3`")
+        assert ghost["status"] == "BLOCKED", \
+            f"HOME 指向 /tmp 时退役路径仍须 BLOCKED（不得误豁免）: {ghost}"
+        assert ghost["ghost_count"] >= 1, ghost
+    finally:
+        if old_home is not None:
+            _os.environ["HOME"] = old_home
+
     print("✓ 幽灵引用扫描：真幽灵检出、干净文本不误报、示例豁免、惰性降级、"
-          "含空格不截断、mention≠use、只读")
+          "含空格不截断、mention≠use、装机路径可见计数、HOME 变化不误豁免、只读")
 
 
 def test_ghost_scan_space_path_three_branches() -> None:
