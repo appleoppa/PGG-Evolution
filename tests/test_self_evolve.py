@@ -1353,6 +1353,45 @@ def test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts() -> None:
           "含空格不截断、mention≠use、只读")
 
 
+def test_ghost_scan_space_path_three_branches() -> None:
+    """含空格路径的消歧必须三支都处理（实测 bug 回归）。
+
+    背景：原实现只在「全长不存在」时回退到空格前，漏了「head 存在」分支，
+    于是 `~/.pi/agent/evolution 沙箱目录`（真路径 + 中文说明）
+    整串被当路径，报成假幽灵。另一个 bug：空格后允许中文，把散文吞进路径。
+
+    三支：
+      A. 全长存在       → 空格是路径的一部分（如 ~/Library/Application Support）
+      B. 全长不存在、head 存在 → 空格是句子边界（真路径 + 中文说明）
+      C. 两者都不存在   → 报全长，**不截断**
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_space", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # 支 B：真路径 + 中文说明 → 不得当幽灵（回归：曾报 ~/.pi/agent/evolution 沙箱）
+    home_evol = str(Path.home() / ".pi" / "agent" / "evolution")
+    if Path(home_evol).exists():
+        got = mod.scan_ghost_references(f"工作区在 `{home_evol} 沙箱目录`")
+        assert got["ghost_count"] == 0, f"真路径+中文说明不得报幽灵: {got}"
+
+    # 支 A：全长存在的含空格路径（本机 /Applications 必存在）
+    real_space = "/Applications/Google Chrome.app"
+    if Path(real_space).exists():
+        got_a = mod.scan_ghost_references(f"应用在 `{real_space}`")
+        assert got_a["ghost_count"] == 0, f"含空格的真路径不得报幽灵: {got_a}"
+
+    # 支 C：都不存在 → 报全长且不截断
+    bogus_space = "~/Library/Application Support/PGG-Ghost-NoSuchDir-xyz/f.json"
+    got_c = mod.scan_ghost_references(f"见 `{bogus_space}`")
+    assert got_c["ghost_count"] >= 1, f"不存在路径必须检出: {got_c}"
+    refs = [g["ref"] for g in got_c["ghosts"]]
+    assert any("PGG-Ghost-NoSuchDir-xyz" in r for r in refs), f"不得截断: {refs}"
+
+    print("✓ 含空格路径三支消歧：全长存在/head 存在/都不存在，均正确")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1439,6 +1478,7 @@ def main() -> None:
     test_risk_tier_classification_is_conservative()
     test_defect_rate_penalizes_worst_shortfall()
     test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts()
+    test_ghost_scan_space_path_three_branches()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
