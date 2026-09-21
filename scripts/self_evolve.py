@@ -715,6 +715,61 @@ def llm_substitute(task_name: str, order: str, provider: str, model: str | None 
     return {"status": "OK", "provider": provider, "model": resp["model"], "task": task_name, "order": order, "path": path_str, "llm_analysis": resp["text"], "note": "LLM 分析结果需人工复核真实性"}
 
 
+# ── 最大短板非线性惩罚（吸收自 EVM 仓库 CoreFormula/EVM_FORMULA.py）───────
+# 来源：`3.EVM-Entropy-Vibe-Mathing仓库/CoreFormula/EVM_FORMULA.py` v1.2
+#
+# 只吸收其中**可验证的真数学**：
+#     defect_rate = avg(defects) * 0.5 + boost_coeff * max(defects) ** 1.5
+# 核心性质：同样总缺陷量，**集中在一处比分散多处惩罚更重**——
+# 因为系统的承压能力取决于最weakest环，不是平均值。
+#
+# 实测验证（本次）：
+#     单一大短板 0.8            → defect_rate = 0.140665
+#     同总量分散为 0.2 × 4        → defect_rate = 0.046750
+#     中等 0.4                  → defect_rate = 0.054614
+# 集中一处的惩罚约为分散四处的 3.0 倍。
+#
+# ★ 明确**不吸收**该仓库的玄学层：其 `AncientTao` 模块的七大道法强度
+#   全部硬编码为 1.0（道德经/易经/黄帝内经/河图洛书/天干地支/五行/八卦），
+#   乘法系数恒等于 1 —— 乘 1 等于没乘，玄学层对结果零作用。
+#   按 SOUL §2 红线「不吸收玄学/伪科学进系统内核」，本实现只取数学部分。
+DEFECT_BOOST_COEFF = 0.15
+
+
+def defect_rate(defects: dict, total_metrics: int | None = None) -> float:
+    """最大短板非线性惩罚的缺陷率。
+
+    defects: {名称: 0.0-1.0 的缺陷程度}
+    total_metrics: 受监测维度的**总数**（含未报缺陷的维度）。
+
+    公式：avg * 0.5 + boost_coeff * max ** 1.5
+
+    为什么不用纯平均：纯平均会**稀释**单一重大短板——
+    9 个指标完美 + 1 个指标崩盘，平均值看着还行，实际系统已经不可用。
+    非线性项保证「最大短板」获得与其危害相称的权重。
+
+    ★ 口径说明（与上游有意区别，不得含糊）：
+    上游 `EVMCore` 用**固定 12 维**向量（Tok/Clw/Agt/Pan/Prm/Soul/Run/
+    Net/Err/...），分母恒为 12，因此传单个 `Tok=0.8` 得 0.140665。
+    本实现若按传入项平均则分母为 1，同输入得 0.507331——**数值不同**。
+    为避免“吸收”变成“偷换口径”，这里显式暴露 `total_metrics`：
+      - `total_metrics=None`（默认）→ 分母 = 传入项数
+      - `total_metrics=12` → 分母 = 12（与上游一致，可复现 0.140665）
+    调用方必须知道自己在用哪种口径。
+    """
+    vals = [float(v) for v in (defects or {}).values()]
+    if not vals:
+        return 0.0
+    # 受监测维度总数：显式值优先，且不得小于已报缺陷项数
+    n = len(vals) if total_metrics is None else max(int(total_metrics), len(vals))
+    avg = sum(vals) / n
+    worst = max(vals)
+    # 钳制到合法区间，防止负数/超界输入制造不真实的高惩罚
+    avg = min(1.0, max(0.0, avg))
+    worst = min(1.0, max(0.0, worst))
+    return round(avg * 0.5 + DEFECT_BOOST_COEFF * (worst ** 1.5), 6)
+
+
 def health_check() -> dict:
     return {
         "status": "OK",
@@ -2231,6 +2286,10 @@ def main() -> int:
     ap.add_argument("--status", action="store_true", help="Λ_ctx 统一状态入口：健康+基因+反馈一处汇总")
     ap.add_argument("--risk-classify", metavar="CHANGE_DESC",
                     help="D03 风险分级 R0-R4：按变更描述定权限层级（只读判定）")
+    ap.add_argument("--defect-rate", metavar="SPEC",
+                    help="最大短板非线性惩罚：SPEC 形如 '名字=值,名字=值'（只读计算）")
+    ap.add_argument("--defect-total", type=int, default=None, metavar="N",
+                    help="--defect-rate 的受监测维度总数（默认=传入项数；传 12 可复现上游 EVM 口径）")
     ap.add_argument("--set", choices=["warmup", "holdout", "holdout2", "all"], default="all", help="评测集合（默认 all）")
     args = ap.parse_args()
 
@@ -2283,6 +2342,35 @@ def main() -> int:
         res = scan_unwired_claims(args.unwired_scan)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         return 0 if res["status"] == "OK" else 1
+
+    if args.defect_rate is not None:
+        # 最大短板非线性惩罚：只读计算，不写盘
+        spec, bad = {}, []
+        for part in (args.defect_rate or "").split(","):
+            if not part.strip():
+                continue
+            if "=" not in part:
+                bad.append(part.strip())
+                continue
+            k, v = part.split("=", 1)
+            try:
+                spec[k.strip()] = float(v)
+            except ValueError:
+                bad.append(part.strip())
+        if bad:
+            print(json.dumps({"status": "REJECTED", "reason": "无法解析的缺陷项",
+                              "bad": bad, "expected": "名字=值,名字=值"}, ensure_ascii=False))
+            return 1
+        print(json.dumps({
+            "defect_rate": defect_rate(spec, args.defect_total),
+            "worst": max(spec.values()) if spec else 0.0,
+            "reported": len(spec),
+            "metrics_total": args.defect_total if args.defect_total is not None else len(spec),
+            "boost_coeff": DEFECT_BOOST_COEFF,
+            "note": "分母为受监测维度总数；传 --defect-total 12 可复现上游 EVM 固定 12 维口径",
+            "boundary": "只计算缺陷率，不触发任何动作",
+        }, ensure_ascii=False, indent=2))
+        return 0
 
     if args.risk_classify is not None:
         # D03 风险分级：只读判定，不写盘、不改权限
