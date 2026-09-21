@@ -1392,6 +1392,63 @@ def test_ghost_scan_space_path_three_branches() -> None:
     print("✓ 含空格路径三支消歧：全长存在/head 存在/都不存在，均正确")
 
 
+def test_shortfall_report_wires_defect_rate_to_real_gaps() -> None:
+    """系统短板体检：把实测缺口接进缺陷率公式（接线，不是摆设字段）。
+
+    这里的关键不是公式算得对（那个 test_defect_rate 已盖），
+    而是**接线纪律不得作弊**：
+      ① 维度数固定 —— 缺数据不得让分母缩水
+      ② 空环境下每维计 1.0（没测 ≠ 没毛病）
+      ③ 有真实数据时取值反映实情，不手填
+      ④ 报告带「不得用于提权」边界
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_short", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    declared = len(mod.SHORTFALL_DIMENSIONS)
+    assert declared >= 4, f"应有多个维度: {declared}"
+
+    # ① + ② 空环境：维度数不缩水，全部计 1.0
+    with tempfile.TemporaryDirectory() as h:
+        old_sandbox, old_plugin = mod.SANDBOX, mod.PLUGIN_DIR
+        mod.SANDBOX = Path(h) / "nonexistent"
+        mod.PLUGIN_DIR = Path(h) / "nonexistent-repo"
+        try:
+            d_empty = mod._shortfall_defects()
+            assert len(d_empty) == declared, \
+                f"缺数据不得使分母缩水: {len(d_empty)} != {declared}"
+            assert all(v == 1.0 for v in d_empty.values()), \
+                f"取不到数据应计 1.0（没测≠没毛病）: {d_empty}"
+            r_empty = mod.shortfall_report()
+            assert r_empty["metrics_total"] == declared, r_empty["metrics_total"]
+            # 空环境不得因「没测」而显得更健康
+            assert r_empty["defect_rate"] > 0.5, r_empty["defect_rate"]
+        finally:
+            mod.SANDBOX, mod.PLUGIN_DIR = old_sandbox, old_plugin
+
+    # ③ 有真实数据时不得手填（至少一个维度应反映真实，而非全 1.0）
+    d_real = mod._shortfall_defects()
+    assert len(d_real) == declared, d_real
+    assert all(0.0 <= v <= 1.0 for v in d_real.values()), d_real
+
+    # ④ 边界必须写明不得提权（防止漂亮分数被拿去升权限）
+    rep = mod.shortfall_report()
+    assert "不得" in rep["boundary"] and "提权" in rep["boundary"], rep["boundary"]
+    assert rep["metrics_total"] == declared, rep
+
+    # 最该修的维度：取缺陷度>0 的降序前 3，且不与 healthy 重叠
+    worst, healthy = rep["worst_first"], rep["healthy"]
+    assert not (set(worst) & set(healthy)), f"worst 与 healthy 不得重叠: {worst} vs {healthy}"
+    for w in worst:
+        assert rep["dimensions"][w] > 0, f"worst 里的维度缺陷度应 > 0: {w}"
+    for hh in healthy:
+        assert rep["dimensions"][hh] == 0, f"healthy 里的维度缺陷度应 = 0: {hh}"
+
+    print("✓ 短板体检：实测接线、缺数据不缩分母、不得提权")
+
+
 def test_gate_scans_untracked_files() -> None:
     """行为测试（真漏洞回归）：未跟踪文件的内容必须进 L3/L4。
 
@@ -1479,6 +1536,7 @@ def main() -> None:
     test_defect_rate_penalizes_worst_shortfall()
     test_ghost_reference_scan_is_blind_to_nothing_but_real_ghosts()
     test_ghost_scan_space_path_three_branches()
+    test_shortfall_report_wires_defect_rate_to_real_gaps()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
