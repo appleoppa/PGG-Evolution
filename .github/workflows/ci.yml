@@ -169,6 +169,95 @@ jobs:
           print("L3 分模式验证通过（纯新增才放宽，含修改/旧文件必退回）")
           PY
 
+      - name: Verify ghost reference scan (自扫本仓库必须干净 + 边界行为)
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          spec = importlib.util.spec_from_file_location("se_ghost_ci", script)
+          mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          
+          # ① 自扫：本仓库 README + docs/*.md 必须全部无幽灵
+          #    （含空白 CI 环境；若本仓库文档引用本机路径会在这里暴露）
+          bad = []
+          for f in [Path("README.md")] + sorted(Path("docs").glob("*.md")):
+              if not f.exists():
+                  continue
+              d = mod.scan_ghost_references(f.read_text(encoding="utf-8", errors="replace"),
+                                            base_dir=str(f.parent))
+              if d["ghosts"]:
+                  bad.append((str(f), [g["ref"] for g in d["ghosts"]]))
+          assert not bad, f"本仓库文档存在幽灵引用: {bad}"
+          
+          # ② 真幽灵必须检出（路径形式）
+          d = mod.scan_ghost_references("见 ~/.pgg-ghost-ci-no-such-dir/file.json")
+          assert d["status"] == "BLOCKED" and d["ghost_count"] >= 1, d
+          
+          # ③ mention ≠ use：裸标识符只 WATCH（否则技能库会被假阳性淹没）
+          d = mod.scan_ghost_references("参考 `pgg-made-up-ci-name` 的做法")
+          assert d["ghost_count"] == 0, d
+          
+          # ④ 示例路径豁免，不得误报
+          for s in ["`/path/to/config.json`", "`<HOME>/x.json`"]:
+              d = mod.scan_ghost_references(s)
+              assert d["ghost_count"] == 0, f"示例路径不得报幽灵: {s} → {d}"
+          
+          # ⑤ 只读：扫描不得创建/修改文件
+          probe = Path(tempfile.mkdtemp())
+          before = sorted(p.name for p in probe.iterdir())
+          mod.scan_ghost_references(f"`{probe}/ghost.json`")
+          assert before == sorted(p.name for p in probe.iterdir()), "扫描不得写文件"
+          
+          # ⑥ CLI 退出码：BLOCKED → exit 1
+          r = subprocess.run([sys.executable, str(script), "--ghost-scan",
+                              "见 ~/.pgg-ghost-ci-no-such-dir/file.json"],
+                             capture_output=True, text=True)
+          assert r.returncode == 1, f"BLOCKED 必须 exit=1: rc={r.returncode}"
+          print("幽灵扫描验证通过（自扫干净/真幽灵拦/mention≠use/示例豁免/只读/退出码）")
+          PY
+
+      - name: Verify shortfall report wires real gaps (缺数据不得缩分母)
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, subprocess, sys, tempfile
+          from pathlib import Path
+          script = Path("scripts/self_evolve.py").resolve()
+          spec = importlib.util.spec_from_file_location("se_short_ci", script)
+          mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          
+          declared = len(mod.SHORTFALL_DIMENSIONS)
+          assert declared >= 4, declared
+          
+          # 空环境：维度数不缩水，全部计 1.0（没测≠没毛病）
+          with tempfile.TemporaryDirectory() as h:
+              old_s, old_p = mod.SANDBOX, mod.PLUGIN_DIR
+              mod.SANDBOX = Path(h) / "none"
+              mod.PLUGIN_DIR = Path(h) / "none-repo"
+              try:
+                  d = mod._shortfall_defects()
+                  assert len(d) == declared, f"缺数据不得缩分母: {len(d)} != {declared}"
+                  assert all(v == 1.0 for v in d.values()), d
+                  r = mod.shortfall_report()
+                  assert r["metrics_total"] == declared, r
+                  assert r["defect_rate"] > 0.5, "空环境不得显得更健康"
+              finally:
+                  mod.SANDBOX, mod.PLUGIN_DIR = old_s, old_p
+          
+          # 边界必须写明不得提权
+          rep = mod.shortfall_report()
+          assert "不得" in rep["boundary"] and "提权" in rep["boundary"], rep["boundary"]
+          assert not (set(rep["worst_first"]) & set(rep["healthy"])), rep
+          
+          # CLI 只读
+          r = subprocess.run([sys.executable, str(script), "--shortfall"],
+                             capture_output=True, text=True)
+          assert r.returncode == 0, r.stdout[:200]
+          out = json.loads(r.stdout)
+          assert out["metrics_total"] == declared, out
+          print(f"短板体检验证通过（{declared} 维固定分母/缺数据不缩水/不得提权）")
+          PY
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'
