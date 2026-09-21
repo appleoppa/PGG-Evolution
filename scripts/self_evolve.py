@@ -905,7 +905,7 @@ GHOST_PATH_PATTERNS = (
     # ★ 路径**可含空格**（如 `~/Library/Application Support/...`）——本库实测
     #   漏掉空格会在第一个空格处截断，造出「~/Library/Application」这种假幽灵。
     re.compile(r"(?:~/|/Users/[A-Za-z0-9_.-]+/)[A-Za-z0-9_./\u4e00-\u9fff\-]+"
-               r"(?: [A-Za-z0-9_\u4e00-\u9fff\-][A-Za-z0-9_./\u4e00-\u9fff\-]*)*"
+               r"(?: [A-Za-z0-9_./\-][A-Za-z0-9_./\-]*)*"
                r"(?:\.(?:json|db|sqlite3?|py|md|sh|yaml|yml|toml|plist|txt))?"),
 )
 
@@ -996,15 +996,20 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
     def _resolve(raw: str) -> Path | None:
         try:
             s = raw.rstrip(".,;:)]}）】、")
-            # 带空格的路径：只有当**含空格的全长**不存在、而**截断到空格**
-            # 之前的那段存在时，才把空格当作句子边界而非路径的一部分。
+            # 带空格的路径：用存在性消歧，三支都要处理。
+            #   实测教训：首版只写了“两者都不存在”一支，漏了“head 存在”分支，
+            #   于是 `~/.pi/agent/evolution 沙箱目录`（真路径+中文说明）
+            #   整串被当成路径，报成幽灵。
             if " " in s:
-                whole = Path(os.path.expanduser(s)) if s.startswith("~/") else Path(s)
-                if not whole.exists():
-                    head = s.split(" ")[0].rstrip(".,;:)")
-                    headp = Path(os.path.expanduser(head)) if head.startswith("~/") else Path(head)
-                    if not headp.exists():
-                        s = whole.as_posix()
+                def _p(x):
+                    return Path(os.path.expanduser(x)) if x.startswith("~/") else Path(x)
+                whole, head = _p(s), _p(s.split(" ")[0].rstrip(".,;:)"))
+                if whole.exists():
+                    s = whole.as_posix()          # 全长存在 → 空格是路径的一部分
+                elif head.exists():
+                    s = s.split(" ")[0].rstrip(".,;:)")   # head 存在 → 空格是句子边界
+                else:
+                    s = whole.as_posix()          # 都无 → 报全长（不截断）
             if s.startswith("~/") or s == "~":
                 return Path(home) / s[2:] if len(s) > 2 else Path(home)
             p = Path(s)

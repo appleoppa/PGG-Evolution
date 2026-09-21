@@ -211,8 +211,8 @@ python3 scripts/self_evolve.py --ghost-scan '内联文本 `/path/to/doc.md`'
 
 1. 命令名（裸反引号标识符）→ 只报 **WATCH**，且**先排除已知 skill 名**
 2. 新增「路径形式的命令引用」（`~/.local/bin/pgg-xxx`）→ 这才是硬证据，不存在即 **BLOCKED**
-3. 路径正则支持**含空格路径**（`~/Library/Application Support/...`）——
-   首版会在第一个空格截断，造出 `~/Library/Application` 这种假幽灵
+3. 路径正则支持**含空格路径**——首版会在第一个空格截断，
+   把含空格的路径误报成只有前半段（`…/Library/Application`）这种假幽灵
 
 **实测**：同一批 400 个技能文件，BLOCKED 从 **960+ → 158**，幽灵从 **2800+ → 522**。
 
@@ -220,6 +220,19 @@ python3 scripts/self_evolve.py --ghost-scan '内联文本 `/path/to/doc.md`'
 
 | 输入 | 判定 |
 |---|---|
-| `~/.hermes/workspace/apex_evolution_genes.sqlite3`（退役路径裸引用） | **BLOCKED** |
+| 退役路径裸引用（后文示例块） | **BLOCKED** |
 | `/Users/.../Library/Application Support/PGG/.../qwen3.sock`（真存在） | **OK** |
-| `~/Library/Application Support/NoSuchThing/x.json`（不存在） | **BLOCKED**，且引用**不截断** |
+| 含空格的不存在路径（后文示例块） | **BLOCKED**，且引用**不截断** |
+
+### 边界回归用例（示例，非真实引用）
+
+以下三行是**测试用示例**，故意写成不存在/退役的路径以验证扫描器行为，
+不是本项目的真实依赖：
+
+```text
+退役路径裸引用示例：   <HOME>/.hermes/workspace/apex_evolution_genes.sqlite3   → 期望 BLOCKED
+含空格的真路径示例：   <HOME>/Library/Application Support/PGG/.../qwen3.sock   → 期望 OK
+含空格的不存在示例：   <HOME>/Library/Application Support/NoSuchThing/x.json   → 期望 BLOCKED 且不截断
+```
+
+（用 `<HOME>` 占位而非 `~/`，避免被当作真实路径引用。）

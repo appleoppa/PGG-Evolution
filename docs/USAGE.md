@@ -24,7 +24,7 @@ python3 scripts/self_evolve.py --health
 # 列出三顺序
 python3 scripts/self_evolve.py --list-orders
 
-# 初始化进化循环工作区（在 ~/.pi/agent/evolution/ 沙箱）
+# 初始化进化循环工作区（在 ~/.pi/agent/evolution 沙箱目录）
 python3 scripts/self_evolve.py --init <task_name>
 
 # 三顺序代入找短板（核心方法）
