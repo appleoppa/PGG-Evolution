@@ -151,7 +151,7 @@ python3 scripts/self_evolve.py --risk-classify "更新凭据密钥"
 
 ```bash
 python3 scripts/self_evolve.py --ghost-scan /path/to/doc.md     # 扫文件
-python3 scripts/self_evolve.py --ghost-scan '内联文本 `~/.x/y.json`'
+python3 scripts/self_evolve.py --ghost-scan '内联文本 `/path/to/doc.md`'
 ```
 
 **幽灵引用** = 文档/工具里写了某个路径或命令，但那个世界已经不存在了。
@@ -159,7 +159,8 @@ python3 scripts/self_evolve.py --ghost-scan '内联文本 `~/.x/y.json`'
 
 **本轮实测撞到两次**（不是假想威胁）：
 
-1. `pgg-promotion-authority-matrix` 硬编码已退役的 Hermes 基因库路径
+1. 旧的晋升矩阵工具（位于 `pgg-archon-agi/runtime-ops/bin-wrappers/`）
+   硬编码已退役的 Hermes 基因库路径
    → 一跑即 `sqlite3.OperationalError: unable to open database file`
 2. 《开智进化循环执行规范》**自己**引用了 `~/.hermes/workspace/...`、
    `apex_evolution_genes.sqlite3` 与 `~/.hermes/.../cron-rounds/…`
@@ -177,3 +178,22 @@ python3 scripts/self_evolve.py --ghost-scan '内联文本 `~/.x/y.json`'
 
 **设计边界**：只判**能机器验证**的引用（路径存在性、命令存在性），
 不解析自然语言描述；只读，绝不修改被扫文件。
+
+### 惰性路径降级（防橡皮图章）
+
+有些引用**首次运行时才生成**（如 `evidence/ledger.json`：登记第一条证据时创建）。
+文档描述准确，但在扫描器眼里与真幽灵长得一样。
+
+**降级规则**：仅当引用**近旁 120 字符窗口内**出现惰性提示词
+（`首次运行`/`运行时生成`/`自动生成`/`沙箱内`/`可删可回滚`/`落 \`` 等）时，
+才降为 **WATCH**，且**永不降为 OK**。
+
+**关键防线（已断言）**：同一路径，**没有**惰性提示仍必须 BLOCKED。
+否则任何幽灵都能靠加一句"将来会生成"放行 —— 那是橡皮图章，不是豁免。
+
+实测边界：
+
+| 输入 | 判定 |
+|---|---|
+| `~/.hermes/.../apex_evolution_genes.sqlite3`，直接打开查询 | **BLOCKED**（ghosts=1, lazy=0） |
+| 同一路径 + 「首次运行时生成，沙箱内可删可回滚」 | **WATCH**（ghosts=0, lazy=1） |

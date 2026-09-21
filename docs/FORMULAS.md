@@ -1,6 +1,8 @@
 # APEX 公式体系（14 维）+ EVM 治理公式
 
-> 来源：`~/Desktop/自我进化/1.Apex仓库/apex-spiral/` 与 `3.EVM-Entropy-Vibe-Mathing仓库/`
+> 来源：外部资源盘 `Apex进化资源文件/1.Apex仓库/apex-spiral/` 与
+> `Apex进化资源文件/3.EVM-Entropy-Vibe-Mathing仓库/`（实读于本机挂载盘；
+> 此处用相对描述而非绝对路径，避免写死会变的挂载点）
 > 定位：公式用于**排序诊断**，不替代硬门禁。分数是辅助，证据才是判据。
 
 ## 1. 主公式（APEX 14 维）

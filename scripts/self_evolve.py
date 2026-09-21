@@ -916,6 +916,19 @@ _GHOST_CMD_PATTERNS = (
 )
 
 
+# 惰性路径提示词：描述为「运行时才生成」的引用不算幽灵。
+# 依据：本库 `docs/EVIDENCE.md` 写「账本落 `…/evidence/ledger.json`
+# （沙箱内，可删可回滚）」——该文件确实首次登记证据时才生成，
+# 文档描述**准确**，但在扫描器眼里与真幽灵长得一样。
+#
+# 纪律（不得变成橡皮图章）：仅在**引用附近窗口**出现惰性提示词时才降级，
+# 且降级为 WATCH 而非 OK。指向已退役世界（如已删的 Hermes 路径）的引用
+# 不带这些提示词，仍为 BLOCKED。
+_GHOST_LAZY_HINTS = re.compile(
+    r"首次(?:运行|登记|执行)|运行时生成|自动生成|按需生成|惰性生成"
+    r"|沙箱内|可删|可回滚|落\s*`|将在.*生成|尚未生成", re.I)
+
+
 def _cmd_exists(cmd: str) -> bool:
     """命令是否存在（查 PATH 与常见 bin 目录，不执行它）。"""
     if shutil.which(cmd):
@@ -940,7 +953,7 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
     """
     home = str(Path.home())
     base = Path(base_dir).expanduser() if base_dir else Path.cwd()
-    ghosts, suspects, checked = [], [], 0
+    ghosts, suspects, lazy, checked = [], [], [], 0
 
     def _resolve(raw: str) -> Path | None:
         try:
@@ -970,6 +983,13 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
                 suspects.append({"kind": "path", "ref": raw, "why": "临时路径，不作为幽灵",
                                  "excerpt": ctx})
                 continue
+            # 近旁有惰性提示词 → 降级为 lazy（WATCH），不直接判幽灵
+            wide = text[max(0, m.start() - 120):m.end() + 120].replace("\n", " ")
+            if _GHOST_LAZY_HINTS.search(wide):
+                lazy.append({"kind": "path", "ref": raw, "resolved": str(p),
+                             "why": "近旁描述为运行时生成/沙箱内可删，非幽灵",
+                             "excerpt": ctx})
+                continue
             ghosts.append({"kind": "path", "ref": raw, "resolved": str(p),
                            "excerpt": ctx})
 
@@ -998,17 +1018,20 @@ def scan_ghost_references(text: str, base_dir: str | None = None) -> dict:
             out.append(it)
         return out
 
-    ghosts, suspects = _dedup(ghosts), _dedup(suspects)
-    status = "BLOCKED" if ghosts else ("WATCH" if suspects else "OK")
+    ghosts, suspects, lazy = _dedup(ghosts), _dedup(suspects), _dedup(lazy)
+    status = "BLOCKED" if ghosts else ("WATCH" if (suspects or lazy) else "OK")
     return {
         "status": status,
         "ghosts": ghosts,
         "suspects": suspects,
+        "lazy": lazy,
         "ghost_count": len(ghosts),
         "suspect_count": len(suspects),
+        "lazy_count": len(lazy),
         "checked": checked,
         "note": "规范化陷阱 #1：引用了不存在的路径/命令，即「规范文件幽灵引用」，"
-                "其后果是一跑即崩或默默拿到空结果，非报错。只读扫描，不修文件。",
+                "其后果是一跑即崩或默默拿到空结果，非报错。只读扫描，不修文件。"
+                "lazy=运行时才生成且文档明确说明的路径（降为 WATCH，不算幽灵）。",
     }
 
 
