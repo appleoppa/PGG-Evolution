@@ -1439,6 +1439,81 @@ def test_ghost_scan_space_path_three_branches() -> None:
     print("✓ 含空格路径三支消歧：全长存在/head 存在/都不存在，均正确")
 
 
+def test_promote_explicit_constraints_transcribes_not_invents() -> None:
+    """约束转录：只搬作者明文写出的话，不推导、不凑数。
+
+    背景：52 条基因的 constraints 全为 0，但实测 8 条基因的文本里
+    **明文写着**硬约束（「禁止旁路直写」「必须闭环到实测验证」）。
+    写在散文里就机器不可判，等于门禁拿不到依据。
+
+    核心纪律（否则就是造假）：
+      · 转录（transcribed-from-text）≠ 推导（text-derivation）
+      · 推不出的保持 unspecified，**不凑数**
+      · 已有显式 constraints 的不覆盖
+      · 默认 dry-run，**不写文件**
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("se_prom", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ① 默认 dry-run：不得写文件
+    with tempfile.TemporaryDirectory() as h:
+        genes = Path(h) / "genes"
+        genes.mkdir(parents=True)
+        gfile = genes / "genes-test.json"
+        original = {"genes": [
+            {"id": "g_prose", "mechanism": "禁止旁路直写正本，必须读回验证",
+             "strategy": ["先写 staging", "读回确认"]},
+            {"id": "g_nothing", "mechanism": "普通描述，无约束词", "strategy": ["做事"]},
+            {"id": "g_has_explicit", "mechanism": "禁止旁路直写",
+             "constraints": {"no_production_write": "已有显式"}},
+        ]}
+        gfile.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+        before = gfile.read_bytes()
+        old_sandbox = mod.SANDBOX
+        mod.SANDBOX = Path(h)
+        try:
+            dry = mod.promote_explicit_constraints(dry_run=True)
+            assert dry["dry_run"] is True, dry
+            assert dry["files_written"] == 0, dry
+            assert gfile.read_bytes() == before, "dry-run 不得写文件"
+            assert dry["would_promote"] >= 1, f"应识别出明文约束基因: {dry}"
+
+            # ② 真写：只转录明文的，不编造推不出的
+            real = mod.promote_explicit_constraints(dry_run=False)
+            assert real["files_written"] == 1, real
+            data = json.loads(gfile.read_text(encoding="utf-8"))
+            by_id = {g.get("id"): g for g in data["genes"]}
+            # 明文约束基因 → 被转录且标源
+            assert by_id["g_prose"].get("constraints"), by_id["g_prose"]
+            assert by_id["g_prose"]["constraints_source"] == "transcribed-from-text"
+            assert "no_production_write" in by_id["g_prose"]["constraints"], by_id["g_prose"]
+            # 无约束词基因 → 不得被塞东西（不凑数）
+            assert not by_id["g_nothing"].get("constraints"), \
+                f"无约束词的基因不得被填约束（不凑数）: {by_id['g_nothing']}"
+            assert "constraints_source" not in by_id["g_nothing"], by_id["g_nothing"]
+            # 已有显式约束 → 不覆盖
+            assert by_id["g_has_explicit"]["constraints"] == {"no_production_write": "已有显式"}, \
+                by_id["g_has_explicit"]
+            assert "constraints_source" not in by_id["g_has_explicit"], by_id["g_has_explicit"]
+
+            # ③ 边界字段必须声明不得冒充作者本意
+            assert "转录" in real["boundary"] and "不凑数" in real["boundary"], real["boundary"]
+        finally:
+            mod.SANDBOX = old_sandbox
+
+    # ④ 只读模式下写动作必须被拦（真跑 CLI）
+    import os as _os
+    ro = dict(_os.environ, PGG_EVOLUTION_READONLY="1")
+    r = subprocess.run([sys.executable, str(SCRIPT), "--promote-constraints", "--apply"],
+                       capture_output=True, text=True, env=ro)
+    assert r.returncode == 1, f"只读下写动作必须 exit=1: rc={r.returncode}"
+    assert json.loads(r.stdout)["status"] == "READONLY_BLOCKED", r.stdout[:200]
+
+    print("✓ 约束转录：dry-run 不写 / 只转录明文 / 不凑数 / 不覆盖显式 / 只读拦")
+
+
 def test_evolution_route_selection_from_opportunity_signals() -> None:
     """运行时机遇信号 → 进化路径选择（APEX-EVOLUTION-ROUTE §4.1 / §1.1）。
 
@@ -1533,8 +1608,16 @@ def test_shortfall_report_wires_defect_rate_to_real_gaps() -> None:
             d_empty = mod._shortfall_defects()
             assert len(d_empty) == declared, \
                 f"缺数据不得使分母缩水: {len(d_empty)} != {declared}"
-            assert all(v == 1.0 for v in d_empty.values()), \
-                f"取不到数据应计 1.0（没测≠没毛病）: {d_empty}"
+            # 依赖 SANDBOX 的维度在空环境下必须计 1.0（没测≠没毛病）。
+            # gate_coverage 例外：它**真测门禁能力**（在临时仓库里探），
+            # 与 SANDBOX 无关，换 SANDBOX 不该改变它——这正是它正确的证据。
+            sandbox_dims = [k for k, _ in mod.SHORTFALL_DIMENSIONS if k != "gate_coverage"]
+            for k in sandbox_dims:
+                assert d_empty[k] == 1.0, \
+                    f"取不到数据应计 1.0（没测≠没毛病）: {k}={d_empty[k]}"
+            # 门禁维度必须与 SANDBOX 无关（真测，不依赖状态）
+            assert d_empty["gate_coverage"] == mod._probe_untracked_coverage(), \
+                "gate_coverage 必须来自真测，不得随 SANDBOX 变化"
             r_empty = mod.shortfall_report()
             assert r_empty["metrics_total"] == declared, r_empty["metrics_total"]
             # 空环境不得因「没测」而显得更健康
@@ -1652,6 +1735,7 @@ def main() -> None:
     test_ghost_scan_space_path_three_branches()
     test_shortfall_report_wires_defect_rate_to_real_gaps()
     test_evolution_route_selection_from_opportunity_signals()
+    test_promote_explicit_constraints_transcribes_not_invents()
     test_permission_doctor_no_contradiction_when_service_down()
     test_service_repair_diagnoses_plist_kinds_safely()
     test_gate_l3_feature_mode_requires_verifiable_entry()
