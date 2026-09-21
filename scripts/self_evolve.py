@@ -1240,14 +1240,45 @@ def _shortfall_defects() -> dict:
     events = _load_feedback().get("events", [])
     d["feedback_signal"] = 0.0 if len(events) >= 3 else (1.0 if not events else 0.5)
 
-    # ⑤ 门禁是否覆盖未跟踪文件（实测：真跑一次）
-    try:
-        _, diff = gate_paths_from_git(REPO)
-        d["gate_coverage"] = 0.0 if diff else 1.0
-    except Exception:
-        d["gate_coverage"] = 1.0
+    # ⑤ 门禁是否真能覆盖未跟踪文件（**真测能力**，不看工作区有没有 diff）
+    #
+    # 修正的假测量：原实现写 `0.0 if diff else 1.0`，把「当前工作区无改动」
+    # 当成「门禁不覆盖未跟踪文件」——两者毫无关系。无 diff 是常态（干净仓库），
+    # 不代表门禁不会漏检新文件。这是典型的「状态字段冒充能力」。
+    #
+    # 真测法：在**临时仓库**里造一个未跟踪文件，看 gate_paths_from_git 能否
+    # 取到它（不污染真实仓库）。能取到 = 能力在（0.0），取不到 = 真缺口（1.0）。
+    d["gate_coverage"] = _probe_untracked_coverage()
 
     return d
+
+
+def _probe_untracked_coverage() -> float:
+    """真测：门禁能否看到未跟踪文件。返回缺陷度（0.0=能，1.0=不能）。
+
+    在临时 git 仓库里造未跟踪文件后调用 gate_paths_from_git，
+    全程不碰真实仓库（只读不变式）。
+    """
+    import subprocess as _sp
+    import tempfile as _tf
+    try:
+        with _tf.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            def g(*a):
+                return _sp.run(["git", "-C", tmp, *a], capture_output=True, text=True, timeout=20)
+            if g("init", "-q").returncode != 0:
+                return 1.0  # git 不可用：无法验证 = 计缺口，不假定通过
+            g("config", "user.email", "probe@probe")
+            g("config", "user.name", "probe")
+            (repo / "tracked.txt").write_text("x\n", encoding="utf-8")
+            g("add", "-A")
+            g("commit", "-qm", "init")
+            (repo / "untracked-probe.py").write_text("probe_value = 42\n", encoding="utf-8")
+            paths, diff = gate_paths_from_git(repo)
+            ok = "untracked-probe.py" in paths and "probe_value" in diff
+            return 0.0 if ok else 1.0
+    except Exception:
+        return 1.0  # fail-closed：测不了就算缺口
 
 
 def shortfall_report() -> dict:
@@ -2180,6 +2211,56 @@ def gene_l5_backfill(dry_run: bool = True) -> dict:
             "note": "回填 _l5_* 派生字段，不填 constraints/validation 本体（缺口保持可见）"}
 
 
+def promote_explicit_constraints(dry_run: bool = True) -> dict:
+    """把基因文本里**明文写出**的约束**转录**到结构化字段。默认 dry-run。
+
+    ★ 与 derive_gene_constraints 的本质区别（否则就是造假）：
+      · derive_*  = 从文本**推导**，结果标 derived_from=text-derivation，
+                    不能冒充作者本意
+      · promote_* = 把作者**已写在 mechanism/strategy 里的话**搬到
+                    constraints 字段，derived_from=transcribed
+    两者都不编造：推不出的保持 unspecified，**不凑数**。
+
+    为什么值得做：52 条基因的 constraints 全为 0，不等于「作者没写约束」——
+    实测 8 条基因的文本里**明文写着**「禁止旁路直写」「必须闭环到实测验证」
+    这类硬约束。它们写在散文里就**机器不可判**，等于门禁拿不到依据。
+    """
+    genes_dir = SANDBOX / "genes"
+    files = sorted(genes_dir.glob("genes-*.json")) if genes_dir.is_dir() else []
+    planned, touched, total = [], 0, 0
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        changed = False
+        for g in d.get("genes", []):
+            total += 1
+            if isinstance(g.get("constraints"), dict) and g.get("constraints"):
+                continue                      # 已有显式约束，不覆盖
+            derived = derive_gene_constraints(g)
+            if not derived["constraints"]:
+                continue                      # 推不出 → 不动，缺口保持可见
+            g["constraints"] = derived["constraints"]
+            g["constraints_source"] = "transcribed-from-text"
+            g["constraints_unspecified"] = derived.get("unspecified", [])
+            changed = True
+            planned.append({"id": g.get("id"), "file": f.name,
+                            "constraints": list(derived["constraints"])})
+        if changed:
+            if not dry_run:
+                f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                touched += 1
+    return {
+        "status": "OK", "dry_run": dry_run, "total_genes": total,
+        "would_promote": len(planned), "files_written": touched if not dry_run else 0,
+        "planned": planned,
+        "boundary": "只转录**文本明文写出**的约束（constraints_source=transcribed-from-text）；"
+                    "推不出的保持 unspecified，不凑数、不编造；"
+                    "已有显式 constraints 的基因不覆盖。",
+    }
+
+
 def _gene_key(g: dict) -> str:
     """基因稳定标识：有 id 用 id；规则提取的基因没有 id，按 source+category+mechanism 派生稳定键。
 
@@ -2740,6 +2821,8 @@ def main() -> int:
                     help="系统短板体检：把实测缺口喂进缺陷率公式，给出最该修的维度（只读）")
     ap.add_argument("--route", metavar="SIGNALS",
                     help="按机会信号选进化路径（逗号分隔信号键，只读；无命中则为 None）")
+    ap.add_argument("--promote-constraints", action="store_true",
+                    help="把基因文本明文写出的约束转录到 constraints 字段（默认 dry-run，--apply 才写）")
     ap.add_argument("--gene-l5-backfill", action="store_true", help="回填推导的 L5 派生字段（默认 dry-run，需 --apply 才写盘）")
     ap.add_argument("--health-deep", action="store_true", help="Ψ 深度健康监测：基因库/记忆库/沙箱/反馈完整性")
     ap.add_argument("--no-memory", action="store_true", help="health-deep 跳过记忆库检查（CI/无记忆库环境用）")
@@ -2790,6 +2873,8 @@ def main() -> int:
         blocked = [k for k, v in READONLY_BLOCKED.items() if v not in (None, False)]
         if args.gene_l5_backfill and args.apply:
             blocked.append("gene_l5_backfill")
+        if args.promote_constraints and args.apply:
+            blocked.append("promote_constraints")
         if blocked:
             print(json.dumps({
                 "status": "READONLY_BLOCKED", "readonly": True, "env": READONLY_SWITCH,
@@ -2960,6 +3045,11 @@ def main() -> int:
     if args.gene_from_memory:
         print(json.dumps(gene_from_memory(args.gene_from_memory, args.llm_provider or "deepseek-v4-flash", args.llm_model), ensure_ascii=False, indent=2))
         return 0
+    if args.promote_constraints:
+        print(json.dumps(promote_explicit_constraints(dry_run=not args.apply),
+                         ensure_ascii=False, indent=2))
+        return 0
+
     if args.route is not None:
         sigs = [s.strip() for s in (args.route or "").split(",") if s.strip()]
         unknown = [s for s in sigs if s not in OPPORTUNITY_SIGNALS]
