@@ -23,6 +23,7 @@ const execFileAsync = promisify(execFile);
 
 const PLUGIN_DIR = join(homedir(), ".pi", "agent", "evolution", "plugin-self-evolution");
 const ENGINE = join(PLUGIN_DIR, "scripts", "self_evolve.py");
+const UNITS = join(PLUGIN_DIR, "scripts", "evolution_units.py");
 const KILL_SWITCH = "SELF_EVOLUTION_PLUGIN_DISABLED";
 
 function disabled(): boolean {
@@ -35,6 +36,22 @@ async function runEngine(args: string[]): Promise<string> {
     maxBuffer: 2 * 1024 * 1024,
   });
   return stdout;
+}
+
+async function runUnits(unit: string, action: string, payload: unknown): Promise<string> {
+  // 非零退出码 = 真拦截；这里把 stdout 原样返回，让调用方看到拒绝理由
+  try {
+    const { stdout } = await execFileAsync(
+      "python3",
+      [UNITS, "--unit", unit, "--action", action, "--payload", JSON.stringify(payload ?? {})],
+      { timeout: 60000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    if (e.stdout) return e.stdout; // 拒绝类结果也带 JSON，照实回传
+    throw err;
+  }
 }
 
 function result(text: string) {
@@ -310,6 +327,7 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
   pi.registerTool(feedbackStatsTool);
   pi.registerTool(pruneTool);
   pi.registerTool(statusTool);
+
   // ── 18. 证据等级登记（E0-E9 诚实性内核）────────────────────────
   const evidenceTool = defineTool({
     name: "pgg_self_evolution_evidence",
@@ -450,4 +468,48 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
       return result(stdout);
     },
   });
+
+  // ── 22. 系统短板体检（缺陷率接进决策路径）──────────────────────
+  const shortfallTool = defineTool({
+    name: "pgg_self_evolution_shortfall",
+    label: "自进化方案 · 系统短板体检",
+    description:
+      "把实测缺口喂进缺陷率公式（最大短板非线性惩罚），给出单一可比较的短板指标" +
+      "与「最该修哪个」。取不到数据的维度计 1.0 而非丢弃（没测≠没毛病）；" +
+      "总分**不得用于提权**（优先级仍看 R0-R4 与平台/法律硬约束）。只读。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      return result(await runEngine(["--shortfall"]));
+    },
+  });
+
+  // ── 23. 机遇信号 → 进化路径选择（任务分发）──────────────────────
+  const routeTool = defineTool({
+    name: "pgg_self_evolution_route",
+    label: "自进化方案 · 选进化路径",
+    description:
+      "按机会信号选进化路径（APEX-EVOLUTION-ROUTE §1.1）：" +
+      "P-OPTIMIZE/P-REPAIR/P-INNOVATE/P-EXPLORE/P-CURRICULUM。" +
+      "**无命中时 route=null（不默认选一条）**；平票时 ambiguous=true" +
+      "（不武断取第一个）；未知信号原样列出不静默丢弃。只读。",
+    parameters: Type.Object({
+      signals: Type.Array(Type.String(), {
+        description: "机会信号键数组，如 [\"recurring_error\"] 或 [\"perf_bottleneck\",\"stable_success_plateau\"]",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const sigs = (params.signals ?? []).map((s: string) => String(s).trim()).filter(Boolean);
+      if (!sigs.length) {
+        return result(JSON.stringify({ status: "NEEDS_SPEC", reason: "需提供至少一个机会信号" }));
+      }
+      return result(await runEngine(["--route", sigs.join(",")]));
+    },
+  });
+
+  pi.registerTool(shortfallTool);
+  pi.registerTool(routeTool);
+
+  pi.registerTool(claimScanTool);
 }
