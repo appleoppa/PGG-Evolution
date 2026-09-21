@@ -286,6 +286,22 @@ jobs:
           print(f"短板体检验证通过（{declared} 维固定分母/缺数据不缩水/不得提权）")
           PY
 
+      - name: Verify plugin tools really load and call (非"文件存在")
+        run: |
+          # 真加载探针：mock pi 真注册 + 真调 execute，把「文件存在」升级为「能力可用」。
+          # 关键：CI **装真依赖**让探针真跑，而不是接受 SKIP——
+          # 「测不了」不能当「没问题」。
+          node --version
+          npm install --no-save --no-audit --no-fund @earendil-works/pi-ai @earendil-works/pi-coding-agent >/dev/null 2>&1 \
+            && echo "依赖已装，探针将真跑" \
+            || echo "::warning::依赖安装失败，探针会 SKIP（不是能力缺失）"
+          node --experimental-strip-types tests/probe_plugin_tools.mjs
+          # 若探针输出 SKIP，则本步视为**未验证**而非通过
+          if node --experimental-strip-types tests/probe_plugin_tools.mjs 2>/dev/null | grep -q '^SKIP'; then
+            echo "::error::探针 SKIP —— 插件工具未被真实验证（依赖缺失）"
+            exit 1
+          fi
+
       - name: Verify engine health
         run: |
           python3 scripts/self_evolve.py --health | grep '"status": "OK"'
