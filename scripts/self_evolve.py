@@ -2591,10 +2591,19 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
                                  "validation": v["validation"],
                                  "derived_from": f"{c['derived_from']}/{v['derived_from']}"}
         out.append(row)
+    # Φ 反馈闭环提示（修结构性断链：此前 match 从不提示回填反馈，
+    # feedback.json 恒为空 → prune 无数据 → 基因库只进不出）
+    matched_ids = [g["id"] for g in out]
     return {"status": "OK", "task": task_desc, "matched": len(top),
             "l5_missing": warned, "genes": out,
+            "feedback_hint": {
+                "why": "Φ 反馈闭环：复用结果回填后，无效基因才能被 --prune-genes 淘汰",
+                "cmd": "self_evolve.py --feedback '<task_desc>' success|failure <gene_id>",
+                "gene_ids": matched_ids,
+            },
             "note": "匹配基因供复用：参考 strategy 修复步骤，勿机械照搬（需人工复核）；"
-                    f"{warned}/{len(top)} 条缺显式 L5 约束层"}
+                    f"{warned}/{len(top)} 条缺显式 L5 约束层；"
+                    "复用后请按 feedback_hint 回填反馈"}
 
 
 def gene_sync(task_name: str) -> dict:
