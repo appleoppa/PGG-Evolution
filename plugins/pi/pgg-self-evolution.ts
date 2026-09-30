@@ -272,6 +272,25 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
     },
   });
 
+  // ── 10b. LLM 语义匹配（关键词粗筛→LLM 精排，失败降级）─────────────
+  const matchLlmTool = defineTool({
+    name: "pgg_self_evolution_match_llm",
+    label: "自进化方案 · LLM 语义匹配",
+    description: "LLM 语义匹配基因：关键词粗筛候选→LLM 语义精排（每条带理由）；LLM 失败自动降级关键词匹配。只读。密钥走白名单凭据桥。",
+    parameters: Type.Object({
+      task: Type.String({ minLength: 1, description: "任务描述（如 本地检索系统故障）" }),
+      provider: Type.Optional(Type.String({ description: "LLM provider（默认 deepseek-v4-flash）" })),
+    }),
+    async execute(_toolCallId, params) {
+      if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
+      const args = ["--match-llm", params.task, "--llm-provider", params.provider || "deepseek-v4-flash"];
+      // LLM 调用耗时高于普通引擎调用，超时放宽到 90s；ENGINE 已在 runEngine 前置判空，此处必非空
+      return result(await execFileAsync("python3", [ENGINE as string, ...args], {
+        timeout: 90000, maxBuffer: 2 * 1024 * 1024,
+      }).then(r => r.stdout));
+    },
+  });
+
   // ── 11. 双向写回 A 向：基因→记忆颗粒 ────────────────────────────
   const geneSyncTool = defineTool({
     name: "pgg_self_evolution_gene_sync",
@@ -303,6 +322,7 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
   });
 
   pi.registerTool(matchTool);
+  pi.registerTool(matchLlmTool);
   pi.registerTool(geneSyncTool);
   pi.registerTool(geneFromMemoryTool);
 
@@ -470,7 +490,7 @@ export default function pggSelfEvolution(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId) {
       if (disabled()) return result(JSON.stringify({ status: "DISABLED", reason: `${KILL_SWITCH}=1` }));
-      const { stdout } = await execFileAsync("python3", [UNITS, "--list"], {
+      const { stdout } = await execFileAsync("python3", [UNITS as string, "--list"], {
         timeout: 30000, maxBuffer: 1024 * 1024,
       });
       return result(stdout);

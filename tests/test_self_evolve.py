@@ -1690,6 +1690,42 @@ def test_gate_scans_untracked_files() -> None:
     print("✓ gate 覆盖未跟踪文件（L3 计入行数 / L4 扫到密钥，修复假阴性）")
 
 
+def test_dedup_genes_load_layer() -> None:
+    """内容去重（20260930）：同内容跨文件副本只保留最早文件，匹配不重复；原始文件不改。"""
+    with tempfile.TemporaryDirectory() as home:
+        body = {"type": "rule", "source": "gaps", "module": "K",
+                "mechanism": "跨文件重复基因内容完全相同验证去重", "resolution": "保留最早"}
+        _seed_rule_genes(home, [body], name="genes-aaa-first.json")
+        _seed_rule_genes(home, [dict(body)], name="genes-bbb-copy.json")
+        st = run_in(["--dedup-genes"], home)
+        assert st.get("duplicates_skipped") == 1, f"应报告 1 条副本: {st}"
+        assert st["skipped"][0]["kept_in"] == "genes-aaa-first.json", st
+        m = run_in(["--match", "重复基因验证去重"], home)
+        srcs = [g.get("_source") for g in m.get("genes", [])]
+        assert srcs.count("genes-aaa-first.json") == 1 and "genes-bbb-copy.json" not in srcs, srcs
+    print("✓ dedup-genes（加载层去重，最早文件为正本，匹配不重复）")
+
+
+def test_dedup_genes_readonly_no_write() -> None:
+    """去重报告必须是只读的：跑完后基因文件字节不变。"""
+    with tempfile.TemporaryDirectory() as home:
+        _seed_rule_genes(home, [{"type": "rule", "source": "gaps", "module": "K",
+                                 "mechanism": "只读验证基因内容", "resolution": "不改盘"}],
+                         name="genes-r.json")
+        gdir = Path(home) / ".pi" / "agent" / "evolution" / "genes"
+        before = {p.name: p.read_bytes() for p in gdir.glob("*.json")}
+        run_in(["--dedup-genes"], home)
+        after = {p.name: p.read_bytes() for p in gdir.glob("*.json")}
+        assert before == after, "dedup-genes 报告不得改任何基因文件"
+    print("✓ dedup-genes 只读（基因文件字节不变）")
+
+
+def test_match_llm_requires_provider() -> None:
+    d = run(["--match-llm", "测试任务"])
+    assert d.get("status") == "BLOCKED", f"缺 provider 应 BLOCKED: {d}"
+    print("✓ match-llm 缺 provider 拦截（fail-closed）")
+
+
 def main() -> None:
     test_health()
     test_health_deep()
@@ -1748,6 +1784,9 @@ def main() -> None:
     test_feedback_stats()
     test_prune_genes()
     test_status_summary()
+    test_dedup_genes_load_layer()
+    test_dedup_genes_readonly_no_write()
+    test_match_llm_requires_provider()
     print("\n全部测试通过 ✅")
 
 

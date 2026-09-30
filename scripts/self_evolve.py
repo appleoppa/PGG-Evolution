@@ -609,6 +609,39 @@ def _evidence_and_ledger_summary() -> dict:
     }
 
 
+def _strip_jsonc_comments(text: str) -> str:
+    """剥掉 JSONC 风格 // 注释（models.json 实际是带注释的配置，stdlib json 解析不了）。
+
+    只处理不在字符串字面量内的 // 与块注释；不修改 models.json 本身。
+    """
+    out, i, n = [], 0, len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i+1]); i += 2; continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True; out.append(ch); i += 1; continue
+        if ch == "/" and i + 1 < n and text[i+1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i+1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i+1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
 def _load_llm_provider(provider: str) -> dict:
     """从 models.json 读 provider 配置 + 白名单凭据桥取真密钥。
 
@@ -619,7 +652,7 @@ def _load_llm_provider(provider: str) -> dict:
     if not MODELS_JSON.exists():
         return {"error": f"models.json 不存在: {MODELS_JSON}"}
     try:
-        data = json.loads(MODELS_JSON.read_text(encoding="utf-8"))
+        data = json.loads(_strip_jsonc_comments(MODELS_JSON.read_text(encoding="utf-8")))
         providers = data.get("providers", {})
     except Exception as e:
         return {"error": f"models.json 解析失败: {e}"}
@@ -2606,6 +2639,154 @@ def match_genes(task_desc: str, top_n: int = 3, include_deprecated: bool = False
                     "复用后请按 feedback_hint 回填反馈"}
 
 
+def _gene_content_key(g: dict) -> str:
+    """基因内容键（不含 _source 文件名）：同内容跨文件副本同键。
+
+    与 _gene_key 的区别：_gene_key 含 _source，适合库内单键标识；
+    内容键用于跨文件去重——同一轮运行写了两份文件时，同内容基因
+    在 _gene_key 下是两个键，淘汰/去重都打不中（实测假阳性）。
+    """
+    gid = g.get("id")
+    if gid:
+        return str(gid)
+    basis = "|".join([
+        str(g.get("category") or g.get("module") or g.get("type") or ""),
+        str(g.get("mechanism", ""))[:80],
+    ])
+    return "derived-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+
+
+def _load_gene_bank() -> list[dict]:
+    """加载沙箱基因库全部基因（含 LLM 生成与规则提取）。
+
+    已淘汰基因（deprecated.json 记录）标记 _deprecated=True，仍保留在库中供追溯。
+    内容去重（20260930）：同内容跨文件副本（同轮运行写两份文件的事故产物）
+    在文件名排序下只保留最早一份，后续副本标 _dedup_skipped 后剔除——
+    原始文件一字不动，可回滚（去重逻辑在加载层，不改盘）。
+    """
+    genes_dir = SANDBOX / "genes"
+    if not genes_dir.is_dir():
+        return []
+    deprecated = _load_deprecated_ids()
+    all_genes = []
+    seen_content: dict[str, str] = {}
+    for f in sorted(genes_dir.glob("genes-*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for g in d.get("genes", []):
+            if isinstance(g, dict) and (g.get("mechanism") or g.get("strategy")):
+                g["_source"] = f.name
+                g["_deprecated"] = _gene_key(g) in deprecated
+                ckey = _gene_content_key(g)
+                if ckey in seen_content:
+                    g["_dedup_skipped_by"] = seen_content[ckey]
+                    continue
+                seen_content[ckey] = f.name
+                all_genes.append(g)
+    return all_genes
+
+
+def dedup_stats() -> dict:
+    """内容去重报告（只读）：哪些副本被加载层剔除、正本是哪个文件。
+
+    诚实边界：去重发生在加载层，原始基因文件一字不动；
+    本函数只报告现状，不写任何盘。
+    """
+    genes_dir = SANDBOX / "genes"
+    if not genes_dir.is_dir():
+        return {"status": "BLOCKED", "reason": "基因库不存在"}
+    total, skipped = 0, []
+    seen: dict[str, str] = {}
+    for f in sorted(genes_dir.glob("genes-*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for g in d.get("genes", []):
+            if not (isinstance(g, dict) and (g.get("mechanism") or g.get("strategy"))):
+                continue
+            total += 1
+            gid = g.get("id")
+            if gid:
+                ckey = str(gid)
+            else:
+                basis = "|".join([
+                    str(g.get("category") or g.get("module") or g.get("type") or ""),
+                    str(g.get("mechanism", ""))[:80],
+                ])
+                ckey = "derived-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+            if ckey in seen:
+                skipped.append({"file": f.name, "kept_in": seen[ckey],
+                                "content_key": ckey[:24],
+                                "mechanism": str(g.get("mechanism", ""))[:60]})
+            else:
+                seen[ckey] = f.name
+    return {"status": "OK", "total_in_files": total, "unique": total - len(skipped),
+            "duplicates_skipped": len(skipped), "skipped": skipped,
+            "note": "去重在加载层生效（最早文件为正本），原始文件保留可回滚；本报告只读"}
+
+
+def match_genes_llm(task_desc: str, provider: str, model: str | None = None,
+                    top_n: int = 3, include_deprecated: bool = False) -> dict:
+    """LLM 语义匹配：关键词粗筛候选 → LLM 语义精排；LLM 失败自动降级关键词匹配（fail-closed）。
+
+    诚实边界：LLM 精排结果带 model 字段；降级时 matched_via="keyword-fallback"
+    并附降级原因，不冒充 LLM 参与（SOUL §3 模型纪律）。
+    """
+    # 粗筛：取关键词匹配 top 8 候选（宽于 top_n，给精排留空间）
+    kw = match_genes(task_desc, top_n=8, include_deprecated=include_deprecated)
+    if kw.get("status") != "OK" or not kw.get("genes"):
+        return {"status": "OK", "task": task_desc, "matched": 0, "genes": [],
+                "matched_via": "keyword-only", "note": "关键词粗筛无候选，跳过 LLM 精排"}
+    cands = kw["genes"]
+
+    system = ("你是基因复用匹配器。给定任务描述和候选基因（机制/策略/信号），"
+              "按语义相关性排序，输出 JSON 数组：[{\"index\": <候选序号从0开始>, \"reason\": \"一句话理由\"}]，"
+              "只输出 JSON，不要其他文字。语义无关的候选不要输出。")
+    cand_text = "\n".join(
+        f"[{i}] 机制: {g.get('mechanism','')} | 策略: {g.get('strategy','')} | 信号: {g.get('signals_match','')}"
+        for i, g in enumerate(cands))
+    r = _llm_chat(provider, system, f"任务：{task_desc}\n\n候选基因：\n{cand_text}", model=model)
+    if "error" in r or not r.get("text"):
+        return {**kw, "matched_via": "keyword-fallback", "fallback_reason": r.get("error", "LLM 返回空")}
+
+    # 解析 LLM 排序（容错：截取首个 JSON 数组）
+    text = r["text"]
+    m = re.search(r"\[.*\]", text, re.DOTALL)
+    ranked = []
+    if m:
+        try:
+            ranked = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            ranked = []
+    if not ranked:
+        return {**kw, "matched_via": "keyword-fallback", "fallback_reason": "LLM 输出不可解析"}
+
+    out = []
+    for item in ranked[:top_n]:
+        try:
+            idx = int(item.get("index"))
+            g = cands[idx]
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            continue
+        row = {k: g[k] for k in ("id", "category", "mechanism", "signals_match", "strategy", "_source") if k in g}
+        if g.get("_signal_overlap"):
+            row["_signal_overlap"] = g["_signal_overlap"]
+        if g.get("l5_warning"):
+            row["l5_warning"] = g["l5_warning"]
+            row["l5_derived"] = g.get("l5_derived")
+        row["llm_reason"] = item.get("reason", "")
+        out.append(row)
+    if not out:
+        return {**kw, "matched_via": "keyword-fallback", "fallback_reason": "LLM 排序无有效候选"}
+    return {"status": "OK", "task": task_desc, "matched": len(out),
+            "matched_via": "llm-rerank", "llm_model": r.get("model", ""), "genes": out,
+            "feedback_hint": kw.get("feedback_hint"),
+            "note": "LLM 语义精排结果；复用后按 feedback_hint 回填反馈"}
+
+
 def gene_sync(task_name: str) -> dict:
     """双向写回 A 向：基因→记忆颗粒。
 
@@ -2822,6 +3003,7 @@ def main() -> int:
     ap.add_argument("--gene", metavar="TASK", help="进化基因沉淀：从 evidence/gaps/candidates 提取经验基因（D12 元学习）")
     ap.add_argument("--gene-llm", metavar="TASK", help="LLM 基因生成：把短板教训总结成结构化可复用基因（需 --llm-provider）")
     ap.add_argument("--match", metavar="TASK_DESC", help="基因匹配复用：新任务描述匹配历史基因（D12 元学习闭环）")
+    ap.add_argument("--match-llm", metavar="TASK_DESC", help="LLM 语义匹配：关键词粗筛→LLM 精排（需 --llm-provider；LLM 失败自动降级关键词匹配）")
     ap.add_argument("--gene-sync", metavar="TASK", help="双向写回 A 向：基因→记忆颗粒（生成结算文档，走标准记忆管线）")
     ap.add_argument("--gene-from-memory", metavar="TOPIC", help="双向写回 B 向：记忆颗粒→基因（从记忆库检索经验，LLM 提炼基因）")
     ap.add_argument("--list-genes", action="store_true", help="列出基因库")
@@ -2838,6 +3020,7 @@ def main() -> int:
     ap.add_argument("--feedback", nargs=3, metavar=("TASK_DESC", "OUTCOME", "GENE_ID"), help="Φ 记录基因复用反馈：success/failure（GENE_ID 可省略填 -）")
     ap.add_argument("--feedback-stats", action="store_true", help="Φ 反馈统计：按基因/总体复用成功率")
     ap.add_argument("--prune-genes", nargs="?", const="0.5", metavar="THRESHOLD", help="Φ 淘汰无效基因：失败率≥阈值(默认0.5)且样本≥2 标记 deprecated")
+    ap.add_argument("--dedup-genes", action="store_true", help="基因内容去重：同内容跨文件副本标 deprecated 运行时过滤（正本=最早文件；默认 dry-run，--apply 才写）")
     ap.add_argument("--apply", action="store_true", help="配合 --gene-l5-backfill：真写盘（否则 dry-run）")
     ap.add_argument("--gate", nargs="*", metavar="PATH", help="五层应用门禁 L1-L5 自检（无参时取 git 工作区变更；可显式传路径）")
     ap.add_argument("--gate-backup", metavar="DIR", help="--gate 的 L1 备份目录")
@@ -2884,6 +3067,8 @@ def main() -> int:
             blocked.append("gene_l5_backfill")
         if args.promote_constraints and args.apply:
             blocked.append("promote_constraints")
+        if args.dedup_genes and args.apply:
+            blocked.append("dedup_genes")
         if blocked:
             print(json.dumps({
                 "status": "READONLY_BLOCKED", "readonly": True, "env": READONLY_SWITCH,
@@ -3047,6 +3232,16 @@ def main() -> int:
         return 0
     if args.match:
         print(json.dumps(match_genes(args.match, include_deprecated=args.include_deprecated), ensure_ascii=False, indent=2))
+        return 0
+    if args.match_llm:
+        if not args.llm_provider:
+            print(json.dumps({"status": "BLOCKED", "reason": "--match-llm 需 --llm-provider"}, ensure_ascii=False))
+            return 2
+        print(json.dumps(match_genes_llm(args.match_llm, args.llm_provider, model=args.llm_model,
+                                          include_deprecated=args.include_deprecated), ensure_ascii=False, indent=2))
+        return 0
+    if args.dedup_genes:
+        print(json.dumps(dedup_stats(), ensure_ascii=False, indent=2))
         return 0
     if args.gene_sync:
         print(json.dumps(gene_sync(args.gene_sync), ensure_ascii=False, indent=2))
